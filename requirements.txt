@@ -1,0 +1,8 @@
+selenium>=4.10.0
+webdriver-manager
+python-docx
+PyPDF2>=3.0.0
+openpyxl
+pandas>=2.0.0
+openai>=1.0.0
+keyboard
