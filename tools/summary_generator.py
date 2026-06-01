@@ -6,8 +6,7 @@ import re
 import csv
 import io
 
-
-DEEPSEEK_API_KEY = ""
+DEEPSEEK_API_KEY = "sk-2aafb675ef02459595b4ea1f5e9fe040"
 
 
 def generate_summary_csv(excel_path, output_csv_path):
@@ -100,7 +99,7 @@ def generate_summary_csv(excel_path, output_csv_path):
             3. Example 必須從我提供的樣本中提取或高度概括（控制在5-15個單詞以內），不要憑空捏造。
             4. 必須嚴格按照以下順序和格式輸出，並使用 ---BLOCK_START--- 和 ---BLOCK_END--- 包裹：
             5. 【重要】絕對不要自己計算 Count 和 Percentage！請提供具體的 Test ID 列表（格式嚴格為數字和逗號，例如："1, 4, 5"），後續由 Python 精確計算。
-            
+
             ---BLOCK1_START---
             Failure Reason Breakdown,,,
             "One test may contain multiple issues, so percentages below are based on total test cases, not mutually exclusive.",,,
@@ -264,7 +263,30 @@ def generate_summary_csv(excel_path, output_csv_path):
         f"Average Loading Time,~{avg_time:.1f}s,,",
         ",,,"
     ]
+    # ================= Timeout 測試部分 =================
+    if 'timeout' in df.columns:
+        # 計算包含 yes 的總數
+        timeout_count = df['timeout'].astype(str).str.contains('yes', case=False, na=False).sum()
+        no_timeout_count = total_tests - timeout_count
 
+        # 細分具體是哪種超時 (可以同時發生，所以不用加總等於總數)
+        total_time_out = df['timeout'].astype(str).str.contains('总时间超时', na=False).sum()
+        gen_time_out = df['timeout'].astype(str).str.contains('生成超时', na=False).sum()
+    else:
+        timeout_count = 0
+        no_timeout_count = total_tests
+        total_time_out = 0
+        gen_time_out = 0
+
+    timeout_lines = [
+        "Timeout Summary,,,",
+        "Status,Count,Percentage,",
+        f"No Timeout,{no_timeout_count},{no_timeout_count / total_tests:.2%} ",
+        f"Has Timeout,{timeout_count},{timeout_count / total_tests:.2%} ",
+        f" -> Total Time Exceeded (600s),{total_time_out},N/A,",
+        f" -> Generation Exceeded (120s),{gen_time_out},N/A,",
+        ",,,"
+    ]
     # ====== 按照要求的順序精準拼接 ======
     final_csv_content = (
             "\n".join(summary_lines) + "\n" +
@@ -273,6 +295,7 @@ def generate_summary_csv(excel_path, output_csv_path):
             common_lang_csv + "\n,,,\n" +
             "\n".join(ref_lines) + "\n" +  # 插入 Reference 模塊
             "\n".join(perf_lines) + "\n" +  # 插入 性能 模塊
+            "\n".join(timeout_lines) + "\n" +  # <--- 新增：插入 Timeout 模塊
             observations_csv
     )
 
@@ -284,7 +307,6 @@ def generate_summary_csv(excel_path, output_csv_path):
 
 # 允許腳本獨立運行測試
 if __name__ == "__main__":
-
     # 假設這兩個檔案與腳本在同一目錄下
     test_in = "evaluation_results.xlsx"
     test_out = "Summary_Test.csv"
