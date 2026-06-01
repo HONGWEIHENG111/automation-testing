@@ -373,10 +373,11 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
         print("   ✅ 已成功进入自动生成等待环节...")
 
         print("⏳ 正在智能监控 AI 生成进度...")
+        timeout_status = "No"
         time.sleep(5)
         last_length = 0
         stable_count = 0
-        max_wait_loops = 600
+        max_wait_loops = 300
         required_stable_seconds = 5
 
         for _ in range(max_wait_loops):
@@ -409,7 +410,10 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
                 print(
                     f"✅ 回答文本已连续 {required_stable_seconds} 秒无变化，判定生成彻底完成！最终字数: {current_length}")
                 break
-
+        else:  # <--- 新增：注意与上面的 for 对齐
+            if not STOP_SCRIPT:
+                print(f"[{i + 1}] ⚠️ 警告：监控达到 300 秒上限，生成总时间超时！")
+                timeout_status = "yes (总时间超时)"
         if STOP_SCRIPT:
             return
 
@@ -429,7 +433,7 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             return False
 
         try:
-            answer_text = WebDriverWait(driver, 120).until(get_valid_preview)
+            answer_text = WebDriverWait(driver, 60).until(get_valid_preview)
             if answer_text == "BROWSER_CLOSED":
                 print("🚨 提取内容时侦测到浏览器已关闭，终止当前任务！")
                 return
@@ -437,8 +441,12 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             answer_text = ""
 
         if not answer_text or not answer_text.strip():
-            print("   ⚠️ 警告：等待 100 秒后依然未抓取到内容！")
+            print("   ⚠️ 警告：等待 60 秒后依然未抓取到内容！")
             answer_text = "提取文本失败/为空"
+            if timeout_status == "No":
+                timeout_status = "yes (生成超时)"
+            else:
+                timeout_status += " & yes (生成超时)"
         else:
             print(f"   ✅ 成功提取到回答，长度: {len(answer_text)} 字符")
 
@@ -518,13 +526,13 @@ def run_automation():
     listener_thread.start()
 
     # ================= 动态路径配置（替代写死的绝对路径） =================
-    USERNAME = ""
-    PASSWORD = ""
+    USERNAME = "HenryHONG"
+    PASSWORD = "12345678"
     project_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 自动拼接 test 文件夹和 question.docx 的路径
     test_dir = os.path.join(project_dir, "test")
-    input_excel_path = r""
+    input_excel_path = r"E:\PycharmProjects\script\Testcase_20260520_1.xlsx"
     # ===================================================================
 
     if not os.path.exists(test_dir):
@@ -563,14 +571,14 @@ def run_automation():
 
     if not os.path.exists(excel_path):
         wb = openpyxl.Workbook()
-        wb.properties.creator = "Henry HONG "
-        wb.properties.description = "Authored by Henry HONG"
+        wb.properties.creator = "Henry HONG (洪伟恒)"
+        wb.properties.description = "Authored by HONGWEIHENG. Tel: 17722596827"
         ws = wb.active
         ws.title = "Evaluation Results"
         ws.append(["label", "Request", "Tester Expectation", "filename", "Selected Language", "Input Language",
                    "Output Language", "Language Overall Status", "answer", "shared link", "DeepSeek评价内容",
                    "Selected agent", "Reference Link", "Document Contain[1][2][3]", "Preparation Time",
-                   "Completion Time"])
+                   "Completion Time","Timeout_States"])
         wb.save(excel_path)
         print(f"📊 已创建评价结果 Excel 文件: {excel_path}")
     # ===============================================================
@@ -608,6 +616,6 @@ def run_automation():
         print("\n✅ 文件夹内所有测试用例已全部运行完毕！")
 
     print("👉 自动化流程结束，控制台即将退出。")
-    input("按 ESC 键退出当前控制台窗口...")
+    #input("按 ESC 键退出当前控制台窗口...")
 if __name__ == "__main__":
     run_automation()
