@@ -203,13 +203,13 @@ def run_automation():
     CURRENT_STATE = "4"
     # ================= 动态路径配置（替代写死的绝对路径） =================
     # 自动获取当前运行的 Python 脚本所在的文件夹路径
-    USERNAME = ""  # 新增：替换为你的实际账号
-    PASSWORD = ""  # 新增：替换为你的实际密码
+    USERNAME = "HenryHONG"  # 新增：替换为你的实际账号
+    PASSWORD = "12345678"  # 新增：替换为你的实际密码
     project_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 自动拼接 test 文件夹和 question.docx 的路径
     test_dir = os.path.join(project_dir, "test")
-    input_excel_path = r""
+    input_excel_path = r"E:\PycharmProjects\script\Testcase_20260520_1.xlsx"
     # ===================================================================
 
     if not os.path.exists(test_dir):
@@ -296,12 +296,12 @@ def run_automation():
     if not os.path.exists(excel_path):
         wb = openpyxl.Workbook()
         # 🟢 隐蔽水印：修改 Excel 文件的底层元数据
-        wb.properties.creator = "Henry HONG "
-        wb.properties.description = "Authored by Henry HONG"
+        wb.properties.creator = "Henry HONG (洪伟恒)"
+        wb.properties.description = "Authored by HONGWEIHENG. Tel: 17722596827"
         ws = wb.active
         ws.title = "Evaluation Results"
             # 写入表头
-        ws.append(["label","Request","Tester Expectation", "filename", "Selected Language","Input Language", "Output Language", "Language Overall Status", "answer", "shared link", "DeepSeek评价内容", "Selected agent", "Reference Link", "Document Contain[1][2][3]", "Preparation Time", "Completion Time"])
+        ws.append(["label","Request","Tester Expectation", "filename", "Selected Language","Input Language", "Output Language", "Language Overall Status", "answer", "shared link", "DeepSeek评价内容", "Selected agent", "Reference Link", "Document Contain[1][2][3]", "Preparation Time", "Completion Time", "Timeout_States"])
         wb.save(excel_path)
         print(f"📊 已创建评价结果 Excel 文件: {excel_path}")
     # ===============================================================
@@ -328,6 +328,7 @@ def run_automation():
         if STOP_SCRIPT:
             print("🛑 收到中止指令，停止处理后续文件。")
             break
+        timeout_status = "No"
         # 🌟每次准备处理新题目时，先看一眼浏览器还在不在
         try:
             _ = driver.window_handles
@@ -523,15 +524,16 @@ def run_automation():
 
         # 动作 4：等待生成结果
             print("⏳ 正在智能监控 AI 生成进度...")
-
+            # --- 新增：初始化当前用例的超时状态 ---
+            timeout_status = "No"
             try:
                 time.sleep(5)  # 先强制等待 5 秒，让前端动画和网络请求先跑起来
 
                 last_length = 0
                 stable_count = 0
-                max_wait_loops = 600  # 最大循环次数（约 400 秒，防止死循环）
+                max_wait_loops = 300  # 最大循环次数（约 400 秒，防止死循环）
                 required_stable_seconds = 5  # 允许中途卡顿 10 秒！可以根据实际情况调大
-                # 最多循环检测 100 次（约 200 秒超时限制）
+                # 最多循环检测 60 次（约 200 秒超时限制）
                 for _ in range(max_wait_loops):
                     if STOP_SCRIPT:
                         print("🛑 收到中止指令，立即停止网页监控！")
@@ -569,7 +571,10 @@ def run_automation():
                         print(
                             f"✅ 回答文本已连续 {required_stable_seconds} 秒无变化，判定生成彻底完成！最终字数: {current_length}")
                         break
-
+                else:
+                    if not STOP_SCRIPT:  # 确保不是因为你按了 ESC 退出的
+                        print("⚠️ 警告：监控达到 300 秒上限，生成总时间超时！")
+                        timeout_status = "yes (总时间超时)"
             except Exception as wait_error:
                 print(f"⚠️ 智能监控发生异常，强制继续执行: {wait_error}")
                 time.sleep(2)  # 保底等待
@@ -583,7 +588,7 @@ def run_automation():
             print("📥 正在提取生成的回答并读取原文件...")
             try:
             # 1. 提取网页回答 (增强版：延长等待，强制倒序查找最新生成的 preview)
-                print("   ⏳ 正在等待并提取最新的可见回答 (最多等待 100 秒)...")
+                print("   ⏳ 正在等待并提取最新的可见回答 (最多等待 60 秒)...")
 
                 def get_valid_preview(d):
                     # 🌟防止浏览器关闭后，WebDriverWait 在这里硬挺 80 秒
@@ -602,21 +607,25 @@ def run_automation():
                     return False
 
                 try:
-                    answer_text = WebDriverWait(driver, 120).until(get_valid_preview)
+                    answer_text = WebDriverWait(driver, 60).until(get_valid_preview)
                     if answer_text == "BROWSER_CLOSED":
                         print("🚨 提取内容时侦测到浏览器已关闭，终止后续任务！")
                         break
                 except Exception:
                     answer_text = ""
 
-            # 保底措施：如果 100 秒到了实在没抓到
+            # 保底措施：如果 60 秒到了实在没抓到
                 if not answer_text or not answer_text.strip():
-                    print("   ⚠️ 警告：等待 100 秒后依然未抓取到内容！")
+                    print("   ⚠️ 警告：等待 60 秒后依然未抓取到内容！")
                 # 加一个额外的调试信息，看看页面上到底有几个 preview
                     debug_previews = driver.find_elements(By.ID, "preview")
                     print(f"   🔍 调试信息：当前页面共有 {len(debug_previews)} 个 ID 为 preview 的元素。")
 
                     answer_text = "提取文本失败/为空"
+                    if timeout_status == "No":
+                        timeout_status = "yes (生成超时)"
+                    else:
+                        timeout_status += " & yes (生成超时)"
                 else:
                     print(f"   ✅ 成功提取到回答，长度: {len(answer_text)} 字符")
                 prep_time = "N/A"
@@ -683,6 +692,7 @@ def run_automation():
                         doc_contain,  # Document Contain[1][2][3]
                         prep_time,  # Preparation Time
                         comp_time,  # Completion Time
+                        timeout_status, # 超时状态
                     ])
                     wb.save(excel_path)
                     print("✅ 评价结果已成功写入 Excel 文件。")
@@ -760,7 +770,7 @@ def run_automation():
 
     # 阻止控制台瞬间关闭，彻底释放并保留浏览器现场
     print("👉 自动化控制权已释放，浏览器将保持开启状态。")
-    input("按 ESC 键退出当前控制台窗口...")
+    #input("按 ESC 键退出当前控制台窗口...")
     while True:
         if STOP_SCRIPT:
             print("👋 侦测到 ESC 退出指令，控制台自动关闭！")
