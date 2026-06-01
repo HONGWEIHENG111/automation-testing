@@ -202,13 +202,13 @@ def run_automation(home_url, env_name):
     CURRENT_STATE = "4"
     # ================= 动态路径配置（替代写死的绝对路径） =================
     # 自动获取当前运行的 Python 脚本所在的文件夹路径
-    USERNAME = ""  # 新增：替换为你的实际账号
-    PASSWORD = ""  # 新增：替换为你的实际密码
+    USERNAME = "HenryHONG"  # 新增：替换为你的实际账号
+    PASSWORD = "12345678"  # 新增：替换为你的实际密码
     project_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 自动拼接 test 文件夹和 question.docx 的路径
     test_dir = os.path.join(project_dir, "test")
-    input_excel_path = r""
+    input_excel_path = r"E:\PycharmProjects\script\Testcase_20260520_1.xlsx"
     # ===================================================================
 
     if not os.path.exists(test_dir):
@@ -295,12 +295,12 @@ def run_automation(home_url, env_name):
     if not os.path.exists(excel_path):
         wb = openpyxl.Workbook()
         # 🟢 隐蔽水印：修改 Excel 文件的底层元数据
-        wb.properties.creator = "Henry HONG "
-        wb.properties.description = "Authored by Henry HONG"
+        wb.properties.creator = "Henry HONG (洪伟恒)"
+        wb.properties.description = "Authored by HONGWEIHENG. Tel: 17722596827"
         ws = wb.active
         ws.title = "Evaluation Results"
             # 写入表头
-        ws.append(["label","Request","Tester Expectation", "filename", "Selected Language","Input Language", "Output Language", "Language Overall Status", "answer", "shared link", "DeepSeek评价内容", "Selected agent", "Reference Link", "Document Contain[1][2][3]", "Preparation Time", "Completion Time"])
+        ws.append(["label","Request","Tester Expectation", "filename", "Selected Language","Input Language", "Output Language", "Language Overall Status", "answer", "shared link", "DeepSeek评价内容", "Selected agent", "Reference Link", "Document Contain[1][2][3]", "Preparation Time", "Completion Time","timeout_States" ])
         wb.save(excel_path)
         print(f"📊 已创建评价结果 Excel 文件: {excel_path}")
     # ===============================================================
@@ -522,7 +522,7 @@ def run_automation(home_url, env_name):
 
         # 动作 4：等待生成结果
             print("⏳ 正在智能监控 AI 生成进度...")
-
+            timeout_status = "No"
             try:
                 time.sleep(5)  # 先强制等待 5 秒，让前端动画和网络请求先跑起来
 
@@ -568,7 +568,10 @@ def run_automation(home_url, env_name):
                         print(
                             f"✅ 回答文本已连续 {required_stable_seconds} 秒无变化，判定生成彻底完成！最终字数: {current_length}")
                         break
-
+                else:  # <--- 新增：注意与上方的 for 对齐
+                    if not STOP_SCRIPT:
+                        print("⚠️ 警告：监控达到 600 秒上限，生成总时间超时！")
+                        timeout_status = "yes (总时间超时)"
             except Exception as wait_error:
                 print(f"⚠️ 智能监控发生异常，强制继续执行: {wait_error}")
                 time.sleep(2)  # 保底等待
@@ -616,6 +619,10 @@ def run_automation(home_url, env_name):
                     print(f"   🔍 调试信息：当前页面共有 {len(debug_previews)} 个 ID 为 preview 的元素。")
 
                     answer_text = "提取文本失败/为空"
+                    if timeout_status == "No":
+                        timeout_status = "yes (生成超时)"
+                    else:
+                        timeout_status += " & yes (生成超时)"
                 else:
                     print(f"   ✅ 成功提取到回答，长度: {len(answer_text)} 字符")
                 prep_time = "N/A"
@@ -683,6 +690,7 @@ def run_automation(home_url, env_name):
                         doc_contain,  # Document Contain[1][2][3]
                         prep_time,  # Preparation Time
                         comp_time,  # Completion Time
+                        timeout_status,
                     ])
                     wb.save(excel_path)
                     print("✅ 评价结果已成功写入 Excel 文件。")
@@ -784,7 +792,7 @@ if __name__ == "__main__":
     t2.join()
 
     print("👉 所有自动化任务均已结束。控制权已释放（浏览器将由 detach 属性保持开启）。")
-    print("等待手动按 ESC 键退出控制台...")
+    #print("等待手动按 ESC 键退出控制台...")
 
     # 维持控制台存活，直到按下 ESC
     while not STOP_SCRIPT:
