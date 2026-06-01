@@ -6,7 +6,7 @@ import re
 import csv
 import io
 
-DEEPSEEK_API_KEY = "sk-2aafb675ef02459595b4ea1f5e9fe040"
+DEEPSEEK_API_KEY = ""
 
 
 def generate_summary_csv(excel_path, output_csv_path):
