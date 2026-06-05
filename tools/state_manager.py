@@ -164,32 +164,39 @@ def execute_state(driver, current_state, target_agent=""):
                     WebDriverWait(driver, 5).until(
                         EC.presence_of_element_located((By.CLASS_NAME, "am-agent-add-btn"))
                     )
-
                     # 把当前网页里所有的加号按钮都抓出来
                     add_buttons = driver.find_elements(By.CLASS_NAME, "am-agent-add-btn")
 
                     clicked = False
                     # 把我们期待的名字转小写，比如 "chatbot"
                     target_lower = target_agent.strip().lower()
-                    # 拼凑出我们期待的 title 完整形态，比如 "add chatbot"
-                    expected_title = f"add {target_lower}"
+                    # 引入重试机制，最多尝试 3 次，防止页面刚刷新导致元素失效 (StaleElement)
+                    for attempt in range(3):
+                        try:
+                            # 每次都重新抓取最新的按钮列表
+                            add_buttons = driver.find_elements(By.CLASS_NAME, "am-agent-add-btn")
 
-                    for btn in add_buttons:
+                            for btn in add_buttons:
 
                         # 【核心防御 2】：获取这个按钮专属的 title 属性
                         # 比如网页上是 title="Add Chatbot"，提取出来就是 "Add Chatbot"
-                        title_text = btn.get_attribute("title")
+                                title_text = btn.get_attribute("title")
 
                         # 把提取出的 title 也转成小写，进行严格比对
-                        if title_text and target_lower in title_text.strip().lower():
+                                if title_text and target_lower in title_text.strip().lower():
                             # 找到了！这个就是我们要的加号！
-                            driver.execute_script("arguments[0].click();", btn)
-                            print(f"   ✅ 已成功精准点击对应的加号按钮 (识别到属性: {title_text})")
-                            clicked = True
-                            break  # 点完收工，跳出循环
+                                    driver.execute_script("arguments[0].click();", btn)
+                                    print(f"   ✅ 已成功精准点击对应的加号按钮 (识别到属性: {title_text})")
+                                    clicked = True
+                                    break  # 点完收工，跳出循环
+                            if clicked:
+                                break
+                        except Exception as stale_err:
+                            print(f"   🔄 [重试] 元素状态发生变化，等待 0.5 秒后重新获取 (尝试 {attempt + 1}/3)...")
+                            time.sleep(0.5)
 
                     if not clicked:
-                        error_msg = f"未找到对应Agent的加号按钮 (预期 title: {expected_title})"
+                        error_msg = f"未找到对应Agent的加号按钮 (预期 title: {target_lower})"
                         print(f"   ⚠️ {error_msg}")
                         raise Exception(error_msg)
 
@@ -203,6 +210,7 @@ def execute_state(driver, current_state, target_agent=""):
 
         except Exception as set_err:
             print(f"   ⚠️ [警告] 设置 Agent Master 面板时超时或失败: {set_err}")
+            raise set_err
     else:
         print(f"❌ 未知的状态值: {current_state}，请检查配置！")
         raise ValueError("Unknown CURRENT_STATE")
