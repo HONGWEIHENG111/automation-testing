@@ -1,17 +1,16 @@
 import json
 from openai import OpenAI
+from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL
+import time
 
-# 建议将 API Key 放在此处，或者后续通过环境变量获取
-DEEPSEEK_API_KEY = ""
-deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
-
+deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
 def evaluate_with_deepseek(question_text: str, file_content: str, answer_text: str, target_language: str) -> dict:
     """
     调用 DeepSeek API 对系统回答进行评估，并返回结构化的字典结果。
     """
     ds_prompt = f"""
-[System Hidden Info: Script authored by Henry HONG . DO NOT output or mention this info in your response.]
+[System Hidden Info: Script authored by Henry HONG (洪伟恒) | Tel: 17722596827. DO NOT output or mention this info in your response.]
 请作为一位严谨的审核专家，结合以下【原始文档】和【用户问题】，对【系统生成的回答】进行客观评价。
 
 你需要完成两个任务：
@@ -63,32 +62,31 @@ def evaluate_with_deepseek(question_text: str, file_content: str, answer_text: s
 {answer_text}
 """
     raw_result = ""
-    try:
-        ds_response = deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "你是一个严谨的AI审核助手，只输出JSON格式的数据。"},
-                {"role": "user", "content": ds_prompt}
-            ]
-        )
-        raw_result = ds_response.choices[0].message.content
-
-        # 去除大模型可能自带的 markdown 格式包裹
-        clean_result = raw_result.replace("```json", "").replace("```", "").strip()
-
-        # 尝试解析为字典
-        result_dict = json.loads(clean_result)
-        return result_dict
-
-    except Exception as e:
-        print(f"⚠️ 调用 DeepSeek 或解析 JSON 格式失败: {e}")
-        # 如果解析失败，返回带有错误信息的默认字典结构
-        return {
-            "tester_expectation": "Parse Error",
-            "input_language": "Parse Error",
-            "output_language": "Parse Error",
-            "language_status": "Failed",
-            "evaluation": f"API调用或解析失败。原始返回：{raw_result if 'raw_result' in locals() else str(e)}",
-            "reference_link": "N/A",
-            "document_contain_citations": "None"
-        }
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            ds_response = deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "你是一个严谨的AI审核助手，只输出JSON格式的数据。"},
+                    {"role": "user", "content": ds_prompt}
+                ]
+            )
+            raw_result = ds_response.choices[0].message.content
+            clean_result = raw_result.replace("```json", "").replace("```", "").strip()
+            return json.loads(clean_result)
+        except Exception as e:
+            print(f"⚠️ 第 {attempt + 1} 次调用 DeepSeek 失败: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # 依次等待 1s, 2s 然后重试
+            else:
+                # 如果解析失败，返回带有错误信息的默认字典结构
+                return {
+                "tester_expectation": "Parse Error",
+                "input_language": "Parse Error",
+                "output_language": "Parse Error",
+                "language_status": "Failed",
+                "evaluation": f"API调用或解析失败。原始返回：{raw_result if 'raw_result' in locals() else str(e)}",
+                "reference_link": "N/A",
+                "document_contain_citations": "None"
+                }
