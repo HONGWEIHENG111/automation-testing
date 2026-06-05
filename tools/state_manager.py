@@ -3,7 +3,7 @@ import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-
+from selenium.webdriver.common.keys import Keys
 def handle_post_send(driver, current_state):
     """
     阶段 2：负责处理点击“发送”按钮之后的特殊状态逻辑
@@ -139,30 +139,24 @@ def execute_state(driver, current_state, target_agent=""):
             time.sleep(0.5)
             # 4. 点击并输入搜索框
             print(f"   🔍 正在搜索指定的 Agent: {target_agent if target_agent else '空'}")
-            search_input = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.ID, "agent-master-search"))
-            )
 
             if target_agent:
-                # 第一步：确保鼠标点进去了
-                driver.execute_script("arguments[0].click(); arguments[0].focus();", search_input)
-                time.sleep(0.5)
 
-                # 第二步：引入 Keys 库（如果你的代码最上面没引用，记得加 from selenium.webdriver.common.keys import Keys）
-                from selenium.webdriver.common.keys import Keys
+                search_input = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.ID, "agent-master-search"))
+                )
+                # 2. 用 JS 一步到位：清空 -> 赋值 -> 触发前端双向绑定事件
+                driver.execute_script("""
+                        arguments[0].value = arguments[1];
+                        arguments[0].dispatchEvent(new Event('input', { bubbles: true }));
+                        arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
+                    """, search_input, target_agent)
 
-                # 暴力清空：用键盘的 Ctrl+A (全选) 然后 Backspace (删除)，这招对付所有顽固框架都有效
-                search_input.send_keys(Keys.CONTROL, 'a')
-                search_input.send_keys(Keys.BACKSPACE)
-                time.sleep(0.5)
+                print(f"   ✅ [JS 注入]: 已在后台成功写入搜索词 '{target_agent}'")
 
-                # 第三步：关键！直接用原生 send_keys 模拟真人一个字一个字敲进去，强行触发网页的搜索机制
-                search_input.send_keys(target_agent)
-
-                # 第四步：留点时间给网页把 General 藏起来，把 Chatbot 刷出来
+                # 留点时间给网页把 General 藏起来，把 Chatbot 刷出来
                 time.sleep(2)
 
-                # 5. 精确抓取并点击第一个匹配的加号
                 # 5. 终极精准匹配：直接锁定 button 的 title 属性
                 print(f"   ➕ 正在精准匹配并添加 Agent: {target_agent}")
                 try:
@@ -181,16 +175,13 @@ def execute_state(driver, current_state, target_agent=""):
                     expected_title = f"add {target_lower}"
 
                     for btn in add_buttons:
-                        # 【核心防御 1】：不点被网页隐藏的按钮
-                        if not btn.is_displayed():
-                            continue
 
                         # 【核心防御 2】：获取这个按钮专属的 title 属性
                         # 比如网页上是 title="Add Chatbot"，提取出来就是 "Add Chatbot"
                         title_text = btn.get_attribute("title")
 
                         # 把提取出的 title 也转成小写，进行严格比对
-                        if title_text and title_text.strip().lower() == expected_title:
+                        if title_text and target_lower in title_text.strip().lower():
                             # 找到了！这个就是我们要的加号！
                             driver.execute_script("arguments[0].click();", btn)
                             print(f"   ✅ 已成功精准点击对应的加号按钮 (识别到属性: {title_text})")
@@ -198,12 +189,15 @@ def execute_state(driver, current_state, target_agent=""):
                             break  # 点完收工，跳出循环
 
                     if not clicked:
-                        print(f"   ⚠️ 搜索结果中未找到对应的可见加号按钮 (预期 title: {expected_title})。")
+                        error_msg = f"未找到对应Agent的加号按钮 (预期 title: {expected_title})"
+                        print(f"   ⚠️ {error_msg}")
+                        raise Exception(error_msg)
 
                     time.sleep(1)
 
                 except Exception as add_err:
                     print(f"   ⚠️ 查找或点击加号按钮时发生异常: {add_err}")
+                    raise add_err
             else:
                 print("   ⚠️ 当前用例的 Selected Agent 为空，跳过输入。")
 
