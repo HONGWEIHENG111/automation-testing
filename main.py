@@ -259,6 +259,10 @@ def run_automation():
         chrome_options = Options()
         chrome_options.add_experimental_option("detach", True)
         chrome_options.add_argument('--ignore-certificate-errors') # 👈 添加这一行即可无视警告
+        # 禁止浏览器后台休眠和节流
+        chrome_options.add_argument('--disable-background-timer-throttling')
+        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+        chrome_options.add_argument('--disable-renderer-backgrounding')
         # 注意：顺手帮你补上了 options=chrome_options，否则你原来的 detach 不会生效
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
         print("✅ 成功启动 Google Chrome！")
@@ -533,7 +537,7 @@ def run_automation():
                 driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", text_area)
                 driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", text_area)
 
-                print("   ✅ [JS 注入成功]: 已成功在后台写入问题文本。")
+                print("   ✅ 已成功在后台写入问题文本。")
                 time.sleep(1)
 
             except Exception as input_err:
@@ -597,7 +601,7 @@ def run_automation():
 
         # 动作 4：等待生成结果
             print("⏳ 正在智能监控 AI 生成进度...")
-            # --- 新增：初始化当前用例的超时状态 ---
+            # 初始化当前用例的超时状态 ---
             timeout_status = "No"
             try:
                 time.sleep(5)  # 先强制等待 5 秒，让前端动画和网络请求先跑起来
@@ -821,7 +825,11 @@ def run_automation():
                 print("   ✅ 成功通过点击 Logo 返回")
             except Exception:
                 # 当找不到 image-home 元素，或者点击失败时，直接请求网址
-                print("   ⚠️ 未识别到主页 Logo，直接重新请求首页网址...")
+                print("   ⚠️ 未识别到主页 Logo，正在清理会话并重新请求首页...")
+                try:
+                    driver.execute_script("window.sessionStorage.clear();")
+                except:
+                    pass
                 driver.get(HOME_URL)
 
                 # 留出一点时间让页面完全加载，准备迎接下一个文件
