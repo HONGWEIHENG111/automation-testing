@@ -22,19 +22,24 @@ from tools.state_manager import execute_state, handle_post_send
 from tools.llm_evaluator import evaluate_with_deepseek
 from tools.summary_generator import generate_summary_csv
 from tools.agent_mapping import AGENT_NAME_MAPPING_TC, TC_TO_ENG_MAPPING
-
+import difflib
+from config import USERNAME, PASSWORD, HOME_URL, INPUT_EXCEL_PATH
+# 动态生成所有合法的 Agent 名称全局列表（包含所有中英文标准名称）
+ALL_VALID_AGENTS = list(AGENT_NAME_MAPPING_TC.keys())
+for tc_list in AGENT_NAME_MAPPING_TC.values():
+    ALL_VALID_AGENTS.extend(tc_list)
+ALL_VALID_AGENTS = list(set(ALL_VALID_AGENTS))
 
 STOP_SCRIPT = False
 
-
 def listen_for_hotkey():
-    """在后台运行的线程，专门监听空格键"""
+    """在后台运行的线程，专门监听终止键"""
     global STOP_SCRIPT
     keyboard.add_hotkey('ctrl+alt+h', show_authorship)
-    # 阻塞等待按下ESC
-    keyboard.wait('esc')
+    # 阻塞等待按下 Ctrl+C
+    keyboard.wait('ctrl+c')
     STOP_SCRIPT = True
-    print("\n\n🛑 [紧急刹车] 侦测到ESC键按下！脚本将在当前步骤跳出，并释放浏览器控制权...\n")
+    print("\n\n🛑 [紧急刹车] 侦测到 Ctrl+C 键按下！脚本将在当前步骤跳出，并释放浏览器控制权...\n")
 
 def smart_sleep(seconds):
     """可随时被紧急刹车打断的睡眠函数"""
@@ -107,9 +112,30 @@ def get_test_data_from_excel(excel_path):
                     elif val in ["filename", "file name", "file_name"]:  # 兼容不同写法
                         header_row = cell.row
                         filename_col = cell.column
-                    elif val in ["selected language", "selected_language"]:  # 识别 Language 表头
-                        header_row = cell.row
-                        language_col = cell.column
+                    else:
+                        # 标准和常见变体词库
+                        lang_keywords = ["selected language", "selected_language", "language", "lang", "目标语言",
+                                         "测试语言", "ui语言", "ui language"]
+                        is_language_column = False
+
+                        # 1. 精确词库匹配
+                        if val in lang_keywords:
+                            is_language_column = True
+
+                        # 2. 子串包含匹配（只要包含核心词根就命中）
+                        elif "language" in val or "lang" in val or "语言" in val:
+                            is_language_column = True
+
+                        # 3. 模糊相似度匹配（容忍测试人员手误拼错，如 "langauge"）
+                        else:
+                            matches = difflib.get_close_matches(val, lang_keywords, n=1, cutoff=0.6)
+                            if matches:
+                                is_language_column = True
+
+                        # 如果通过以上任一防线确认是语言列，则记录列号
+                        if is_language_column:
+                            header_row = cell.row
+                            language_col = cell.column
             # 如果两个表头都找到了，就跳出循环
             if request_col and agent_col:
                 break
@@ -197,27 +223,18 @@ def run_automation():
     # 开启后台键盘监听线程
     listener_thread = threading.Thread(target=listen_for_hotkey, daemon=True)
     listener_thread.start()
-
-
     # 在这里手动修改你要运行的状态：1, 2, 3...
     CURRENT_STATE = "4"
     # ================= 动态路径配置（替代写死的绝对路径） =================
-    # 自动获取当前运行的 Python 脚本所在的文件夹路径
-    USERNAME = "HenryHONG"  # 新增：替换为你的实际账号
-    PASSWORD = "12345678"  # 新增：替换为你的实际密码
     project_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # 自动拼接 test 文件夹和 question.docx 的路径
     test_dir = os.path.join(project_dir, "test")
-    input_excel_path = r"E:\PycharmProjects\script\Testcase_20260520_1.xlsx"
-    # ===================================================================
 
     if not os.path.exists(test_dir):
         print(f"[致命错误] 找不到测试文件夹: {test_dir}")
         return
 
     # 获取所有问题
-    questions, selected_agents, target_filenames, selected_languages = get_test_data_from_excel(input_excel_path)
+    questions, selected_agents, target_filenames, selected_languages = get_test_data_from_excel(INPUT_EXCEL_PATH)
     if not questions:
         print("未提取到任何问题，程序终止。")
         return
@@ -241,6 +258,7 @@ def run_automation():
         print("🔍 尝试启动首选浏览器：Google Chrome...")
         chrome_options = Options()
         chrome_options.add_experimental_option("detach", True)
+        chrome_options.add_argument('--ignore-certificate-errors') # 👈 添加这一行即可无视警告
         # 注意：顺手帮你补上了 options=chrome_options，否则你原来的 detach 不会生效
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
         print("✅ 成功启动 Google Chrome！")
@@ -250,28 +268,40 @@ def run_automation():
         try:
             edge_options = EdgeOptions()
             edge_options.add_experimental_option("detach", True)
+            edge_options.add_argument('--ignore-certificate-errors')
             driver = webdriver.Edge(service=EdgeService(EdgeChromiumDriverManager().install()), options=edge_options)
             print("✅ 成功启动 Microsoft Edge！")
         except Exception as e_edge:
             print(f"❌ [致命错误] Chrome 和 Edge 均启动失败，请检查浏览器安装环境！\n错误信息: {e_edge}")
             return
-    HOME_URL = "https://customs-demo.poffices.ai/"
     driver.get(HOME_URL)
     time.sleep(1)  # 等待页面初始加载
-    # ================= 新自动登录逻辑 =================
+
+    # ================= 自动登录逻辑 =================
     print("🔑 正在执行自动登录...")
     try:
-        # 1. 点击导航栏的 Login 唤出弹窗
-        driver.find_element(By.ID, "nav-login").click()
-        time.sleep(1)  # 等待弹窗动画加载
+        # 1. 点击导航栏的 Login (此处可以使用原生 click，因为刚启动一般还在前台，但稳妥起见可以用显式等待)
+        login_nav = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.ID, "nav-login"))
+        )
+        driver.execute_script("arguments[0].click();", login_nav)
 
-        # 2. 输入账号和密码
-        driver.find_element(By.ID, "sso-username").send_keys(USERNAME)
-        driver.find_element(By.ID, "sso-password").send_keys(PASSWORD)
+        # 2. 等待账号密码框出现，并使用 JS 注入
+        username_input = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "sso-username"))
+        )
+        password_input = driver.find_element(By.ID, "sso-password")
 
-        # 3. 点击提交登录按钮
-        driver.find_element(By.CLASS_NAME, "sso-submit-btn").click()
-        time.sleep(1)  # 等待登录页面跳转
+        # JS 注入账号密码
+        driver.execute_script("arguments[0].value = arguments[1];", username_input, USERNAME)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", username_input)
+
+        driver.execute_script("arguments[0].value = arguments[1];", password_input, PASSWORD)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
+
+        # 3. JS 点击提交按钮
+        submit_btn = driver.find_element(By.CLASS_NAME, "sso-submit-btn")
+        driver.execute_script("arguments[0].click();", submit_btn)
         close_popups(driver)
         print("✅ 登录动作已提交，等待页面刷新...")
         time.sleep(1)  # 等待登录成功后的页面跳转和加载
@@ -283,7 +313,7 @@ def run_automation():
 
     # ================= 初始化 Excel 结果文件 =================
     # 1. 提取原始测试用例的文件名（例如把 "Testcase_20260520_1.xlsx" 变成 "Testcase_20260520_1"）
-    base_testcase_name = os.path.splitext(os.path.basename(input_excel_path))[0]
+    base_testcase_name = os.path.splitext(os.path.basename(INPUT_EXCEL_PATH))[0]
 
     # 2. 生成当前时间戳（格式例如：20260526_090339）
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -296,8 +326,8 @@ def run_automation():
     if not os.path.exists(excel_path):
         wb = openpyxl.Workbook()
         # 🟢 隐蔽水印：修改 Excel 文件的底层元数据
-        wb.properties.creator = "Henry HONG (洪伟恒)"
-        wb.properties.description = "Authored by HONGWEIHENG. Tel: 17722596827"
+        wb.properties.creator = "Henry HONG "
+        wb.properties.description = "Authored by Henry HONG. "
         ws = wb.active
         ws.title = "Evaluation Results"
             # 写入表头
@@ -384,35 +414,50 @@ def run_automation():
 
 
         target_agent_raw = str(target_agent).strip() if target_agent else ""
+        # ================= 拼写纠错与智能降级逻辑 =================
+        if target_agent_raw and target_agent_raw not in ALL_VALID_AGENTS:
+            # 找不到完全匹配的，尝试进行相似度匹配 (0.6为容错率，可根据实际体验微调)
+            matches = difflib.get_close_matches(target_agent_raw, ALL_VALID_AGENTS, n=1, cutoff=0.6)
 
+            if matches:
+                print(f"[{i + 1}] 🔧 [智能纠错]: 侦测到拼写错误 '{target_agent_raw}'，已自动纠正为合法的 '{matches[0]}'")
+                target_agent_raw = matches[0]  # 用正确的名字覆盖手误输入
+            else:
+                print(
+                    f"[{i + 1}] ⚠️ [降级警告]: 错得太离谱，无法识别 Agent '{target_agent_raw}'，自动降级为通用模式 (State 2)！")
+                target_agent_raw = ""  # 清空名字
+                CURRENT_STATE = "2"  # 强制降级为不选 Agent 的状态
+        # ===================================================================
         # 判断当前的 UI 语言是否为繁中
-        is_tc_ui = target_language and ("繁中" in str(target_language) or "繁体" in str(target_language))
+        tc_keywords = ["繁中", "繁体", "繁體", "traditional chinese", "tc", "zh-tw"]
+        is_tc_ui = target_language and any(keyword in str(target_language).lower() for keyword in tc_keywords)
         # 升级为候选列表，支持多个备用词
         search_candidates = []
-        if is_tc_ui:
-            # -------------------------------------------------------------
-            # 【情况 A】Selected Language 是繁中
-            # -------------------------------------------------------------
-            if target_agent_raw in AGENT_NAME_MAPPING_TC:
-                # 逻辑 1：Agent 输入是英文 -> 获取整个繁中候选列表 (例如 ["談判策略", "談判方案"])
-                search_candidates = AGENT_NAME_MAPPING_TC[target_agent_raw]
-                print(f"   🔄 [Agent 转换]: 繁中 UI 匹配到英文输入，载入候选列表 -> {search_candidates}")
+        if target_agent_raw:
+            if is_tc_ui:
+                # -------------------------------------------------------------
+                # 【情况 A】Selected Language 是繁中
+                # -------------------------------------------------------------
+                if target_agent_raw in AGENT_NAME_MAPPING_TC:
+                    # 逻辑 1：Agent 输入是英文 -> 获取整个繁中候选列表 (例如 ["談判策略", "談判方案"])
+                    search_candidates = AGENT_NAME_MAPPING_TC[target_agent_raw]
+                    print(f"   🔄 [Agent 转换]: 繁中 UI 匹配到英文输入，载入候选列表 -> {search_candidates}")
+                else:
+                    # 逻辑 2：Agent 输入是繁中 -> 直接用繁中搜索
+                    search_candidates = [target_agent_raw]
+                    print(f"   🎯 [Agent 保持]: 繁中 UI 匹配到繁中输入，直接搜索 -> '{target_agent_raw}'")
             else:
-                # 逻辑 2：Agent 输入是繁中 -> 直接用繁中搜索
-                search_candidates = [target_agent_raw]
-                print(f"   🎯 [Agent 保持]: 繁中 UI 匹配到繁中输入，直接搜索 -> '{target_agent_raw}'")
-        else:
-            # -------------------------------------------------------------
-            # 【情况 B】Selected Language 是英文或者空白
-            # -------------------------------------------------------------
-            if target_agent_raw in TC_TO_ENG_MAPPING:
+                # -------------------------------------------------------------
+                # 【情况 B】Selected Language 是英文或者空白
+                # -------------------------------------------------------------
+                if target_agent_raw in TC_TO_ENG_MAPPING:
                 # 逻辑 4：Agent 输入是繁中 -> 繁中转英文搜索
-                search_candidates = [TC_TO_ENG_MAPPING[target_agent_raw]]
-                print(f"   🔄 [Agent 转换]: 英文 UI 匹配到繁中输入，已自动转为英文 -> '{search_candidates[0]}'")
-            else:
+                    search_candidates = [TC_TO_ENG_MAPPING[target_agent_raw]]
+                    print(f"   🔄 [Agent 转换]: 英文 UI 匹配到繁中输入，已自动转为英文 -> '{search_candidates[0]}'")
+                else:
                 # 逻辑 3：Agent 输入是英文 -> 直接用英文搜索
-                search_candidates = [target_agent_raw]
-                print(f"   🎯 [Agent 保持]: 英文 UI 匹配到英文输入，直接搜索 -> '{target_agent_raw}'")
+                    search_candidates = [target_agent_raw]
+                    print(f"   🎯 [Agent 保持]: 英文 UI 匹配到英文输入，直接搜索 -> '{target_agent_raw}'")
         # ==== 打印信息，方便你监控 ====
         print(f"\n--- 进度: {i + 1}/{len(questions)} ---")
         print(f"❓ 输入问题: {question_text if question_text else '【无文本，仅上传文件】'}")
@@ -428,7 +473,7 @@ def run_automation():
         # --- 网页自动化交互逻辑 ---
         try:
             # 只有明确指定了繁中或繁体，才切换繁中；其他所有情况（包括为空、英文、乱码等）全都默认切英文
-            if target_language and ("繁中" in str(target_language) or "繁体" in str(target_language)):
+            if is_tc_ui:
                 print("   🌐 [语言切换]: 正在切换为 繁中...")
                 # 1. 点击 Language 容器展开下拉菜单
                 lang_container = WebDriverWait(driver, 3).until(
@@ -463,17 +508,37 @@ def run_automation():
                 time.sleep(1)
             #  2：只有在非纯文本模式下，才执行上传文件动作
             if not is_text_only and file_path:
-                file_input = driver.find_element(By.XPATH, "//input[@type='file']")
+                file_input = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
+                )
                 file_input.send_keys(file_path)
                 time.sleep(1)  # 等待前端读取文件
             else:
                 print("   📄 [跳过]: 纯文本模式，无需上传文件。")
 
-            # 动作 2：输入问题文本
-            text_area = driver.find_element(By.ID, "background-info")
-            text_area.clear()
-            text_area.send_keys(question_text)
-            time.sleep(1)
+            # 动作 2：输入问题文本（用显式等待DOM存在 + JS异步注入，完美兼容窗口最小化）
+            try:
+                # 1. 显式等待元素加载到 DOM 树中（不要求窗口必须在前台可见）
+                text_area = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "background-info"))
+                )
+
+                # 2. 使用 JavaScript 强行清空原文本
+                driver.execute_script("arguments[0].value = '';", text_area)
+
+                # 3. 使用 JavaScript 强行注入新的问题文本
+                driver.execute_script("arguments[0].value = arguments[1];", text_area, question_text)
+
+                # 4. 关键核心：向输入框连续派发 input 和 change 事件，确保 Vue/React 等前端框架能抓取到新数据
+                driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", text_area)
+                driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", text_area)
+
+                print("   ✅ [JS 注入成功]: 已成功在后台写入问题文本。")
+                time.sleep(1)
+
+            except Exception as input_err:
+                print(f"   ❌ 输入问题文本时发生异常: {input_err}")
+                raise input_err
 
             # 动作3，按齿轮
             print("   🔍 [通用步骤]: 正在点击设置齿轮图标...")
@@ -501,7 +566,15 @@ def run_automation():
 
             # 如果列表里的词全都试过了还是不行，抛出异常，让外层捕获并直接跳过当前用例
             if not agent_success:
-                raise Exception(f"所有候选 Agent {search_candidates} 均无法找到！报错信息: {last_err}")
+                print(
+                    f"   ⚠️ [保底机制触发]: 所有候选 Agent {search_candidates} 均无法找到！已自动降级为 State 2 (通用自动模式)。")
+                CURRENT_STATE = "2"
+
+                # 修改 target_agent 变量，以便最终写入 Excel 时能够溯源
+                target_agent = str(target_agent) + " (未找到，降级为 State 2)"
+
+                # 重新调用状态 2 的 UI 配置，切回到 Agent Finder Mode 并开启 Auto
+                execute_state(driver, CURRENT_STATE)
 
         # Apply settings
             print("   🔍 [通用步骤]: 面板配置完毕，正在点击 Apply Settings...")
@@ -553,7 +626,8 @@ def run_automation():
                         previews = driver.find_elements(By.ID, "preview")
                         for p in reversed(previews):
                             if p.is_displayed():
-                                current_length = len(p.text.strip())
+                                actual_text = p.get_attribute("innerText") or p.get_attribute("textContent") or ""
+                                current_length = len(actual_text.strip())
                                 break  # 找到了最新的回答，获取长度后跳出
                     except Exception:
                         pass  # 忽略查找元素时偶发的 DOM 刷新错误
@@ -572,7 +646,7 @@ def run_automation():
                             f"✅ 回答文本已连续 {required_stable_seconds} 秒无变化，判定生成彻底完成！最终字数: {current_length}")
                         break
                 else:
-                    if not STOP_SCRIPT:  # 确保不是因为你按了 ESC 退出的
+                    if not STOP_SCRIPT:  # 确保不是因为你按了 Ctrl+C 退出的
                         print("⚠️ 警告：监控达到 300 秒上限，生成总时间超时！")
                         timeout_status = "yes (总时间超时)"
             except Exception as wait_error:
@@ -602,8 +676,9 @@ def run_automation():
                 # 因为如果不刷新网页，页面上会堆积 3 个 preview。
                 # 最新的回答一定是在网页的最底层（列表的最后面），倒着找能 100% 避开前两个旧回答的干扰。
                     for p in reversed(previews):
-                        if p.is_displayed() and len(p.text.strip()) > 0:
-                            return p.text
+                        actual_content = p.get_attribute("innerText") or p.get_attribute("textContent") or ""
+                        if len(actual_content.strip()) > 0:
+                            return actual_content
                     return False
 
                 try:
@@ -633,7 +708,7 @@ def run_automation():
                 try:
                 # 获取整个页面的纯文本（无视复杂的 HTML 标签嵌套）
                     time.sleep(1)
-                    page_text = driver.find_element(By.TAG_NAME, "body").text
+                    page_text = driver.find_element(By.TAG_NAME, "body").get_attribute("innerText") or ""
 
                 # 用正则精准捕获数字和单位 (例如 "1s", "182.8s")
                     prep_match = re.search(r'(?:Time of preparation|準備時長:)[^\d]*([\d\.]+s?)', page_text,
@@ -652,9 +727,20 @@ def run_automation():
                 else:
                     file_content = read_file_content(file_path)
 
-                print("🤖 成功提取网页回答，正在等待 DeepSeek 进行语言检测与质量评价...")
-                eval_results = evaluate_with_deepseek(question_text, file_content, answer_text, target_language)
-
+                if "yes" in timeout_status.lower():
+                    print("   ⚠️ 侦测到超时，跳过 DeepSeek 评价，直接记录为超时失败...")
+                    eval_results = {
+                        "tester_expectation": "Failed",
+                        "input_language": "N/A",
+                        "output_language": "N/A",
+                        "language_status": "Failed",
+                        "evaluation": "生成超时或提取失败，未能获取有效回答。",
+                        "reference_link": "N/A",
+                        "document_contain_citations": "None"
+                    }
+                else:
+                    print("🤖 成功提取网页回答，正在等待 DeepSeek 进行语言检测与质量评价...")
+                    eval_results = evaluate_with_deepseek(question_text, file_content, answer_text, target_language)
                 tester_exp = eval_results.get("tester_expectation", "Unknown")
                 input_lang = eval_results.get("input_language", "Unknown")
                 output_lang = eval_results.get("output_language", "Unknown")
@@ -754,15 +840,16 @@ def run_automation():
             driver.get(HOME_URL)
             time.sleep(2)
 
-    if not STOP_SCRIPT:
-        print("📊 正在生成最终的 Summary 报告...")
-        # 你的 input_excel_path 这里可能需要改成你实际生成的 evaluation_results.xlsx 的路径
+    print("📊 正在生成最终的 Summary 报告...")
+    try:
         dynamic_csv_name = f"Summary_{base_testcase_name}_{timestamp}.csv"
         summary_dir = os.path.join(project_dir, "Summaries")  # 你可以在这里自定义 CSV 文件夹名称
         os.makedirs(summary_dir, exist_ok=True)
         output_csv = os.path.join(summary_dir, dynamic_csv_name)
         generate_summary_csv(excel_path, output_csv)
         print(f"✅ 汇总报告已生成: {output_csv}")
+    except Exception as e:
+        print(f"⚠️ 生成汇总报告时发生异常: {e}")
     if STOP_SCRIPT:
         print("\n🛑 任务已被手动中断！")
     else:
@@ -770,10 +857,10 @@ def run_automation():
 
     # 阻止控制台瞬间关闭，彻底释放并保留浏览器现场
     print("👉 自动化控制权已释放，浏览器将保持开启状态。")
-    #input("按 ESC 键退出当前控制台窗口...")
+    #input("按 Ctrl+C 键退出当前控制台窗口...")
     while True:
         if STOP_SCRIPT:
-            print("👋 侦测到 ESC 退出指令，控制台自动关闭！")
+            print("👋 侦测到 Ctrl+C 退出指令，控制台自动关闭！")
             break
         try:
             # 尝试获取窗口句柄，如果获取失败说明浏览器已经被你手动关闭了
