@@ -5,9 +5,8 @@ from openai import OpenAI
 import re
 import csv
 import io
-
-DEEPSEEK_API_KEY = ""
-
+from datetime import datetime
+from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, USERNAME, PASSWORD, HOME_URL
 
 def generate_summary_csv(excel_path, output_csv_path):
     if not os.path.exists(excel_path):
@@ -22,14 +21,19 @@ def generate_summary_csv(excel_path, output_csv_path):
         return
 
     # 1. Overall Test Result Summary (只要 Language Failed 或 Tester 覺得 Failed/Poor 就判定為 Failed)
-    failed_mask = (df['Language Overall Status'].astype(str).str.contains('Failed', na=False, case=False)) | \
-                  (df['Tester Expectation'].astype(str).isin(['Poor', 'Failed']))
+    timeout_mask = df.get('timeout_States', pd.Series(['No'] * len(df))).astype(str).str.contains('yes', case=False,
+                                                                                                  na=False)
+    valid_total_tests = total_tests - timeout_mask.sum()  # 非超时任务的有效总数
+    failed_mask = ((df['Language Overall Status'].astype(str).str.contains('Failed', na=False, case=False)) | \
+                   (df['Tester Expectation'].astype(str).isin(['Poor', 'Failed']))) & (~timeout_mask)
     failed_count = failed_mask.sum()
-    pass_count = total_tests - failed_count
+    pass_count = valid_total_tests - failed_count
 
     # 2. 收集所有的 DeepSeek 评价与回答，用于动态生成 Failure Tags
     eval_data = []
     for idx, row in df.iterrows():
+        if timeout_mask[idx]:  # 如果是超时行，直接跳过
+            continue
         eval_text = str(row.get('DeepSeek评价内容', '')).strip()
         ans_text = str(row.get('answer', '')).strip()
         # 排除掉无效评价，只把有实质评价的内容喂给大模型
@@ -41,8 +45,9 @@ def generate_summary_csv(excel_path, output_csv_path):
     all_evals_text = "\n".join(eval_data)
 
     # 3. Language Testing Summary
-    lang_fail_count = df['Language Overall Status'].astype(str).str.contains('Failed', na=False, case=False).sum()
-    lang_pass_count = total_tests - lang_fail_count
+    lang_fail_count = (df['Language Overall Status'].astype(str).str.contains('Failed', na=False, case=False) & (
+        ~timeout_mask)).sum()
+    lang_pass_count = valid_total_tests - lang_fail_count
 
     # 5. Performance Summary
     comp_times = pd.to_numeric(df['Completion Time'].astype(str).str.replace('s', '', regex=False), errors='coerce')
@@ -53,24 +58,28 @@ def generate_summary_csv(excel_path, output_csv_path):
     # 計算 Reference Testing 數據 ======
     if 'Reference Link' in df.columns:
         ref_pass_count = df['Reference Link'].astype(str).str.contains('Pass', case=False, na=False).sum()
-        ref_fail_count = total_tests - ref_pass_count
+        ref_fail_count = valid_total_tests - ref_pass_count
     else:
         ref_pass_count = 0
         ref_fail_count = 0
 
     if 'Document Contain[1][2][3]' in df.columns:
         doc_pass_count = df['Document Contain[1][2][3]'].astype(str).str.contains('Pass', case=False, na=False).sum()
-        doc_none_count = total_tests - doc_pass_count
+        doc_none_count = valid_total_tests - doc_pass_count
     else:
         doc_pass_count = 0
         doc_none_count = 0
 
     # ====== 6. 呼叫 DeepSeek 生成主觀分析 ======
     print("🤖 正在呼叫 DeepSeek 提取 Example 與生成關鍵觀察 ...")
-    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
     # 提取語言錯誤的回答樣本 (新增傳入 Test ID)
-    lang_failed_samples = df[df['Language Overall Status'].astype(str).str.contains('Failed', case=False, na=False)][
+    lang_failed_mask = df['Language Overall Status'].astype(str).str.contains('Failed', case=False, na=False)
+    timeout_mask = ~df.get('timeout_States', pd.Series(['No'] * len(df))).astype(str).str.contains('yes', case=False,
+                                                                                                   na=False)
+
+    lang_failed_samples = df[lang_failed_mask & timeout_mask][
         ['Input Language', 'Output Language', 'answer']].dropna().head(50)
     lang_failed_text = "\n".join(
         [
@@ -218,7 +227,15 @@ def generate_summary_csv(excel_path, output_csv_path):
         observations_csv = "Key Observations,,,\nArea,Observation,,\nError,API Failed,,\n"
     # ====== 7. 拼接最終的 CSV 內容並寫入檔案 ======
     print("📝 正在生成最終的 CSV 報告...")
-
+    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    meta_info_lines = [
+        "System Login & Generation Info,,,",
+        f"Login Website,{HOME_URL},,",
+        f"Login Account,{USERNAME},,",
+        f"Login Password,{PASSWORD},,",
+        f"Generation Time,{current_time_str},,",
+        ",,,"  # 空行分隔线
+    ]
     # 1. 總結部分
     summary_lines = [
         "Overall Test Result Summary,,,",
@@ -228,14 +245,15 @@ def generate_summary_csv(excel_path, output_csv_path):
         f"Failed,{failed_count},{failed_count / total_tests:.2%} ",
         ",,,"
     ]
-
+    valid_div = valid_total_tests if valid_total_tests > 0 else 1
     # 2. 語言測試部分
     lang_lines = [
         "Language Testing Summary,,,",
         "Overall Language Status,,,",
         "Status,Count,Percentage,",
-        f"Pass,{lang_pass_count},{lang_pass_count / total_tests:.2%} ",
-        f"Failed,{lang_fail_count},{lang_fail_count / total_tests:.2%} ",
+
+        f"Pass,{lang_pass_count},{lang_pass_count / valid_div:.2%} ",
+        f"Failed,{lang_fail_count},{lang_fail_count / valid_div:.2%} ",
         ",,,",
     ]
 
@@ -244,13 +262,13 @@ def generate_summary_csv(excel_path, output_csv_path):
         "Reference Testing Summary,,,",
         "Reference Output Status,,,",
         "Status,Count,Percentage,",
-        f"Pass,{ref_pass_count},{ref_pass_count / total_tests:.2%} ",
-        f"Failed,{ref_fail_count},{ref_fail_count / total_tests:.2%} ",
+        f"Pass,{ref_pass_count},{ref_pass_count / valid_div:.2%} ",
+        f"Failed,{ref_fail_count},{ref_fail_count / valid_div:.2%} ",
         ",,,",
         "Document Citation Status,,,",
         "Status,Count,Percentage,",
-        f"Pass,{doc_pass_count},{doc_pass_count / total_tests:.2%} ",
-        f"None,{doc_none_count},{doc_none_count / total_tests:.2%} ",
+        f"Pass,{doc_pass_count},{doc_pass_count / valid_div:.2%} ",
+        f"None,{doc_none_count},{doc_none_count / valid_div:.2%} ",
         ",,,"
     ]
 
@@ -264,31 +282,54 @@ def generate_summary_csv(excel_path, output_csv_path):
         ",,,"
     ]
     # ================= Timeout 測試部分 =================
-    if 'timeout' in df.columns:
-        # 計算包含 yes 的總數
-        timeout_count = df['timeout'].astype(str).str.contains('yes', case=False, na=False).sum()
+    # ================= Timeout 測試部分 =================
+    if 'timeout_States' in df.columns:
+        # 1. 宏观超时判定 (只要有 yes 就是超时)
+        timeout_mask = df['timeout_States'].astype(str).str.contains('yes', case=False, na=False)
+        timeout_count = timeout_mask.sum()
         no_timeout_count = total_tests - timeout_count
 
-        # 細分具體是哪種超時 (可以同時發生，所以不用加總等於總數)
-        total_time_out = df['timeout'].astype(str).str.contains('总时间超时', na=False).sum()
-        gen_time_out = df['timeout'].astype(str).str.contains('生成超时', na=False).sum()
+        timeout_ids = df[timeout_mask].index + 1
+        timeout_ids_str = ", ".join(map(str, timeout_ids.tolist())) if timeout_count > 0 else "None"
+
+        no_timeout_ids = df[~timeout_mask].index + 1
+        no_timeout_ids_str = ", ".join(map(str, no_timeout_ids.tolist())) if no_timeout_count > 0 else "None"
+
+        # 2. 细分：总时间超时的数量与号数
+        total_timeout_mask = df['timeout_States'].astype(str).str.contains('总时间超时', na=False)
+        total_time_out = total_timeout_mask.sum()
+        total_timeout_ids = df[total_timeout_mask].index + 1
+        total_timeout_ids_str = ", ".join(map(str, total_timeout_ids.tolist())) if total_time_out > 0 else "None"
+
+        # 3. 细分：生成超时的数量与号数
+        gen_timeout_mask = df['timeout_States'].astype(str).str.contains('生成超时', na=False)
+        gen_time_out = gen_timeout_mask.sum()
+        gen_timeout_ids = df[gen_timeout_mask].index + 1
+        gen_timeout_ids_str = ", ".join(map(str, gen_timeout_ids.tolist())) if gen_time_out > 0 else "None"
+
     else:
         timeout_count = 0
         no_timeout_count = total_tests
         total_time_out = 0
         gen_time_out = 0
+        timeout_ids_str = "None"
+        no_timeout_ids_str = ", ".join(map(str, range(1, total_tests + 1))) if total_tests > 0 else "None"
+        total_timeout_ids_str = "None"
+        gen_timeout_ids_str = "None"
 
+    # 4. 写入 CSV 行
     timeout_lines = [
         "Timeout Summary,,,",
-        "Status,Count,Percentage,",
-        f"No Timeout,{no_timeout_count},{no_timeout_count / total_tests:.2%} ",
-        f"Has Timeout,{timeout_count},{timeout_count / total_tests:.2%} ",
-        f" -> Total Time Exceeded (600s),{total_time_out},N/A,",
-        f" -> Generation Exceeded (120s),{gen_time_out},N/A,",
+        "Status,Count,Percentage,Matching Test IDs",
+        f"No Timeout,{no_timeout_count},{no_timeout_count / total_tests:.2%} ,\"{no_timeout_ids_str}\"",
+        f"Has Timeout (Total),{timeout_count},{timeout_count / total_tests:.2%} ,\"{timeout_ids_str}\"",
+        f" -> Total Time Exceeded (600s),{total_time_out},N/A,\"{total_timeout_ids_str}\"",  # 👈 新增号数输出
+        f" -> Generation Exceeded (120s),{gen_time_out},N/A,\"{gen_timeout_ids_str}\"",  # 👈 新增号数输出
         ",,,"
     ]
     # ====== 按照要求的順序精準拼接 ======
     final_csv_content = (
+            "\n".join(meta_info_lines) + "\n" +
             "\n".join(summary_lines) + "\n" +
             failure_reason_csv + "\n,,,\n" +
             "\n".join(lang_lines) + "\n" +
