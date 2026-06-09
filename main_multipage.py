@@ -26,7 +26,7 @@ from tools.summary_generator import generate_summary_csv
 from tools.agent_mapping import AGENT_NAME_MAPPING_TC, TC_TO_ENG_MAPPING
 import difflib
 from config import USERNAME, PASSWORD, HOME_URL, INPUT_EXCEL_PATH, MAX_WORKERS
-
+from threading import Lock
 # 动态生成所有合法的 Agent 名称全局列表（包含所有中英文标准名称）
 ALL_VALID_AGENTS = list(AGENT_NAME_MAPPING_TC.keys())
 for tc_list in AGENT_NAME_MAPPING_TC.values():
@@ -34,7 +34,17 @@ for tc_list in AGENT_NAME_MAPPING_TC.values():
 ALL_VALID_AGENTS = list(set(ALL_VALID_AGENTS))
 STOP_SCRIPT = False
 CONSECUTIVE_CLOSES = 0
+# ================= 全局打印锁与安全打印函数 =================
+PRINT_LOCK = Lock()
 
+def safe_print(*args, **kwargs):
+    """
+    线程安全的打印函数。
+    它保证同一时刻只能有一个线程往控制台输出文字，其他线程必须排队等它打印完。
+    """
+    with PRINT_LOCK:
+        print(*args, **kwargs)
+# ==================================================================
 def listen_for_hotkey():
     """在后台运行的线程，专门监听终止键"""
     global STOP_SCRIPT
@@ -55,14 +65,14 @@ def smart_sleep(seconds):
 
 def close_popups(driver):
     """专门用于检测并关闭页面上的干扰弹窗"""
-    print("🔍 正在执行弹窗清理扫雷...")
+    safe_print("🔍 正在执行弹窗清理扫雷...")
     # 【目标 1】处理 Welcome 导览弹窗 (点击 Skip)
     try:
         skip_btn = WebDriverWait(driver, 1).until(
             EC.presence_of_element_located((By.ID, "gen-tour-welcome-skip"))
         )
         driver.execute_script("arguments[0].click();", skip_btn)
-        print("✅ 已成功跳过 Welcome 导览弹窗")
+        safe_print("✅ 已成功跳过 Welcome 导览弹窗")
         time.sleep(0.5)
     except Exception:
         pass
@@ -73,12 +83,12 @@ def close_popups(driver):
             EC.presence_of_element_located((By.XPATH, "//label[@for='dontShowAgain']"))
         )
         driver.execute_script("arguments[0].click();", dont_show_label)
-        print("✅ 已勾选 'Don't show this again'")
+        safe_print("✅ 已勾选 'Don't show this again'")
         time.sleep(0.5)
 
         close_btn = driver.find_element(By.CLASS_NAME, "credit-popup-close")
         driver.execute_script("arguments[0].click();", close_btn)
-        print("✅ 已成功关闭 News 弹窗")
+        safe_print("✅ 已成功关闭 News 弹窗")
     except Exception:
         pass
 
@@ -91,7 +101,7 @@ def get_test_data_from_excel(excel_path):
     selected_languages = []
 
     if not os.path.exists(excel_path):
-        print(f"[致命错误] 找不到 Excel 文件: {excel_path}")
+        safe_print(f"[致命错误] 找不到 Excel 文件: {excel_path}")
         return questions, selected_agents, filenames, selected_languages
 
     try:
@@ -127,9 +137,11 @@ def get_test_data_from_excel(excel_path):
                         # 1. 精确词库匹配
                         if val in lang_keywords:
                             is_language_column = True
+
                         # 2. 子串包含匹配（只要包含核心词根就命中）
                         elif "language" in val or "lang" in val or "语言" in val:
                             is_language_column = True
+
                         # 3. 模糊相似度匹配（容忍测试人员手误拼错，如 "langauge"）
                         else:
                             matches = difflib.get_close_matches(val, lang_keywords, n=1, cutoff=0.6)
@@ -140,20 +152,23 @@ def get_test_data_from_excel(excel_path):
                         if is_language_column:
                             header_row = cell.row
                             language_col = cell.column
-            # 如果两个表头都找到了，就跳出循环
-            if request_col and agent_col:
+            # 只要发现了 Request 或 Filename 任意一个核心锚点，就确认是表头并跳出扫描。
+            # 这样既不会被可能在第一行出现的随机备注（如 "默认Language"）骗到，也能完整扫描完这一行的所有列。
+            if request_col is not None or filename_col is not None:
                 break
 
-        if not request_col:
-            print(f"[致命错误] 在 Excel({excel_path}) 中找不到 'Request' 表头！")
+        if not request_col and not filename_col:
+            print(f"[致命错误] 在 Excel({excel_path}) 中找不到 'Request' 也找不到 'Filename' 表头！无法提供任何测试输入。")
             return questions, selected_agents, filenames, selected_languages
 
         if not filename_col:
-            print(f"[致命错误] 在 Excel({excel_path}) 中找不到 'filename' 表头！无法进行文件匹配。")
-            return questions, selected_agents, filenames, selected_languages
+            print(f"[降级提示] 找不到 'Filename' 表头，将自动降级为【纯文本模式】运行。")
 
         if not agent_col:
-            print(f"[警告] 找不到 'Selected Agent' 表头，Agent 列表将返回空值。")
+            print(f"[降级提示] 找不到 'Selected Agent' 表头，将自动降级为【状态 2 (通用自动模式)】。")
+
+        if not language_col:
+            print(f"[降级提示] 找不到 'Language' 表头，将自动使用【英文 (默认)】。")
 
         for row in range(header_row + 1, ws.max_row + 1):
             req_val = ws.cell(row=row, column=request_col).value if request_col else ""
@@ -165,7 +180,7 @@ def get_test_data_from_excel(excel_path):
             # 只要 Request 不为空 或者 Filename 不为空，就认为这是一条有效数据
             if req_str or file_str:
                 questions.append(req_str)
-
+                filenames.append(file_str)
                 # 读取对应的 Agent
                 if agent_col:
                     agent_val = ws.cell(row=row, column=agent_col).value
@@ -173,8 +188,6 @@ def get_test_data_from_excel(excel_path):
                 else:
                     selected_agents.append("")
 
-                # 记录 Filename
-                filenames.append(file_str)
                 # 读取对应的 Language
                 if language_col:
                     lang_val = ws.cell(row=row, column=language_col).value
@@ -221,17 +234,17 @@ def read_file_content(file_path):
                 content = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
 
     except Exception as e:
-        print(f"❌ 读取文件 {os.path.basename(file_path)} 内容时失败: {e}")
+        safe_print(f"❌ 读取文件 {os.path.basename(file_path)} 内容时失败: {e}")
 
     return content
 
 
 def process_single_task(i, question_text, target_agent, filename, target_language, test_dir, excel_path,
-                        excel_write_lock, USERNAME, PASSWORD, HOME_URL, CONSECUTIVE_CLOSES):
+                        excel_write_lock, USERNAME, PASSWORD, HOME_URL):
     global STOP_SCRIPT
-
+    global CONSECUTIVE_CLOSES
     if STOP_SCRIPT:
-        print(f"🛑 [任务 {i + 1}] 收到中止指令，停止处理。")
+        safe_print(f"🛑 [任务 {i + 1}] 收到中止指令，停止处理。")
         return
 
     actual_file_name = None
@@ -255,14 +268,14 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
         # 核心逻辑：如果找不到文件
         if not has_file_input:
             if question_text and str(question_text).strip():
-                print(f"\n⚠️ [{i + 1}] [降级运行] 找不到文件 '{filename}'，但存在 Request，降级为仅发送问题的纯文本模式！")
+                safe_print(f"\n⚠️ [{i + 1}] [降级运行] 找不到文件 '{filename}'，但存在 Request，降级为仅发送问题的纯文本模式！")
             else:
-                print(f"\n❌ [{i + 1}] [跳过任务] 找不到文件 '{filename}' 且没有 Request，无法继续，跳过此条任务！")
+                safe_print(f"\n❌ [{i + 1}] [跳过任务] 找不到文件 '{filename}' 且没有 Request，无法继续，跳过此条任务！")
                 return
     else:
         # 如果 Excel 里没写 filename，再双重确认下有没有 request
         if not question_text or not str(question_text).strip():
-            print(f"\n❌ [{i + 1}] [跳过任务] Request 和 Filename 同时为空，跳过此条任务！")
+            safe_print(f"\n❌ [{i + 1}] [跳过任务] Request 和 Filename 同时为空，跳过此条任务！")
             return
 
     # 标志位：没找到文件，或者根本没提供 filename，那就是纯文本模式
@@ -278,17 +291,28 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
     target_agent_raw = str(target_agent).strip() if target_agent else ""
     # ================= 拼写纠错与智能降级逻辑 =================
     if target_agent_raw and target_agent_raw not in ALL_VALID_AGENTS:
-        # 找不到完全匹配的，尝试进行相似度匹配 (0.6为容错率，可根据实际体验微调)
-        matches = difflib.get_close_matches(target_agent_raw, ALL_VALID_AGENTS, n=1, cutoff=0.6)
+        lower_agents_mapping = {agent.lower(): agent for agent in ALL_VALID_AGENTS}
+        target_agent_lower = target_agent_raw.lower()
 
-        if matches:
-            print(f"[{i + 1}] 🔧 [智能纠错]: 侦测到拼写错误 '{target_agent_raw}'，已自动纠正为合法的 '{matches[0]}'")
-            target_agent_raw = matches[0]  # 用正确的名字覆盖手误输入
+        # 第一步防禦：嘗試「無視大小寫的精確匹配」（解決 ceo -> CEO, data analyst -> Data Analyst）
+        if target_agent_lower in lower_agents_mapping:
+            correct_name = lower_agents_mapping[target_agent_lower]
+            safe_print(f"[{i + 1}] 🔧 [大小寫修正]: 偵測到大小寫不標準 '{target_agent_raw}'，已自動修正為 '{correct_name}'")
+            target_agent_raw = correct_name
         else:
-            print(
-                f"[{i + 1}] ⚠️ [降级警告]: 错得太离谱，无法识别 Agent '{target_agent_raw}'，自动降级为通用模式 (State 2)！")
-            target_agent_raw = ""  # 清空名字
-            CURRENT_STATE = "2"  # 强制降级为不选 Agent 的状态
+            # 第二步防禦：如果大小寫一致也找不到，再走「無視大小寫的模糊匹配」（解決拼寫錯誤，如 data analist）
+            matches = difflib.get_close_matches(target_agent_lower, list(lower_agents_mapping.keys()), n=1, cutoff=0.6)
+
+            if matches:
+                correct_name = lower_agents_mapping[matches[0]]
+                safe_print(
+                    f"[{i + 1}] 🔧 [智能糾錯]: 偵測到拼寫錯誤 '{target_agent_raw}'，已自動糾正為合法的 '{correct_name}'")
+                target_agent_raw = correct_name  # 用正確的名字覆蓋
+            else:
+                safe_print(
+                    f"[{i + 1}] ⚠️ [降級警告]: 錯得太離譜，無法識別 Agent '{target_agent_raw}'，自動降級為通用模式 (State 2)！")
+                target_agent_raw = ""  # 清空名字
+                CURRENT_STATE = "2"  # 強制降級為不選 Agent 的狀態
     # ===================================================================
 
     # 判断当前的 UI 语言是否为繁中
@@ -305,11 +329,11 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             if target_agent_raw in AGENT_NAME_MAPPING_TC:
                 # 逻辑 1：Agent 输入是英文 -> 获取整个繁中候选列表 (例如 ["談判策略", "談判方案"])
                 search_candidates = AGENT_NAME_MAPPING_TC[target_agent_raw]
-                print(f"[{i + 1}] 🔄 [Agent 转换]: 繁中 UI 匹配到英文输入，载入候选列表 -> {search_candidates}")
+                safe_print(f"[{i + 1}] 🔄 [Agent 转换]: 繁中 UI 匹配到英文输入，载入候选列表 -> {search_candidates}")
             else:
                 # 逻辑 2：Agent 输入是繁中 -> 直接用繁中搜索
                 search_candidates = [target_agent_raw]
-                print(f"[{i + 1}] 🎯 [Agent 保持]: 繁中 UI 匹配到繁中输入，直接搜索 -> '{target_agent_raw}'")
+                safe_print(f"[{i + 1}] 🎯 [Agent 保持]: 繁中 UI 匹配到繁中输入，直接搜索 -> '{target_agent_raw}'")
         else:
             # -------------------------------------------------------------
             # 【情况 B】Selected Language 是英文或者空白
@@ -317,35 +341,39 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             if target_agent_raw in TC_TO_ENG_MAPPING:
                 # 逻辑 4：Agent 输入是繁中 -> 繁中转英文搜索
                 search_candidates = [TC_TO_ENG_MAPPING[target_agent_raw]]
-                print(f"[{i + 1}] 🔄 [Agent 转换]: 英文 UI 匹配到繁中输入，已自动转为英文 -> '{search_candidates[0]}'")
+                safe_print(f"[{i + 1}] 🔄 [Agent 转换]: 英文 UI 匹配到繁中输入，已自动转为英文 -> '{search_candidates[0]}'")
             else:
                 # 逻辑 3：Agent 输入是英文 -> 直接用英文搜索
                 search_candidates = [target_agent_raw]
-                print(f"[{i + 1}] 🎯 [Agent 保持]: 英文 UI 匹配到英文输入，直接搜索 -> '{target_agent_raw}'")
+                safe_print(f"[{i + 1}] 🎯 [Agent 保持]: 英文 UI 匹配到英文输入，直接搜索 -> '{target_agent_raw}'")
 
     # ==== 打印信息 ====
-    print(f"\n--- 进度: {i + 1} ---")
-    print(f"❓ 输入问题: {question_text if question_text else '【无文本，仅上传文件】'}")
-    print(f"🤖 目标Agent: {target_agent if target_agent and str(target_agent).strip() else '【未指定，自动使用状态 2】'}")
-    print(f"⚙️ 最终执行状态: {CURRENT_STATE}")
+    safe_print(f"\n--- 进度: {i + 1} ---")
+    safe_print(f"❓ 输入问题: {question_text if question_text else '【无文本，仅上传文件】'}")
+    safe_print(f"🤖 目标Agent: {target_agent if target_agent and str(target_agent).strip() else '【未指定，自动使用状态 2】'}")
+    safe_print(f"⚙️ 最终执行状态: {CURRENT_STATE}")
 
     if not is_text_only:
-        print(f"📄 准备上传文件: {actual_file_name}")
+        safe_print(f"📄 准备上传文件: {actual_file_name}")
     else:
-        print(f"📄 纯文本/降级模式，无需上传文件。")
+        safe_print(f"📄 纯文本/降级模式，无需上传文件。")
 
     driver = None
     try:
         # ================= 启动专属浏览器 =================
-        print(f"[{i + 1}] 🔍 尝试启动首选浏览器：Google Chrome...")
+        safe_print(f"[{i + 1}] 🔍 尝试启动首选浏览器：Google Chrome...")
         try:
             chrome_options = Options()
             chrome_options.add_experimental_option("detach", True)
             chrome_options.add_argument('--ignore-certificate-errors')  # 👈 增加无视警告
+            # 禁止浏览器后台休眠和节流
+            chrome_options.add_argument('--disable-background-timer-throttling')
+            chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+            chrome_options.add_argument('--disable-renderer-backgrounding')
             driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
         except Exception as e_chrome:
-            print(f"[{i + 1}] ⚠️ Chrome 启动失败: {e_chrome}")
-            print(f"[{i + 1}] 🔄 正在尝试启动备用浏览器：Microsoft Edge...")
+            safe_print(f"[{i + 1}] ⚠️ Chrome 启动失败: {e_chrome}")
+            safe_print(f"[{i + 1}] 🔄 正在尝试启动备用浏览器：Microsoft Edge...")
             edge_options = EdgeOptions()
             edge_options.add_experimental_option("detach", True)
             edge_options.add_argument('--ignore-certificate-errors')  # 👈 增加无视警告
@@ -355,7 +383,7 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
         time.sleep(1)
 
         # ================= 执行自动登录 =================
-        print(f"[{i + 1}] 🔑 正在执行自动登录...")
+        safe_print(f"[{i + 1}] 🔑 正在执行自动登录...")
 
         # 1. 点击导航栏的 Login
         login_nav = WebDriverWait(driver, 10).until(
@@ -379,15 +407,14 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
         submit_btn = driver.find_element(By.CLASS_NAME, "sso-submit-btn")
         driver.execute_script("arguments[0].click();", submit_btn)
 
-        time.sleep(1)
         close_popups(driver)
-        print(f"[{i + 1}] ✅ 登录动作已提交，等待页面刷新...")
+        safe_print(f"[{i + 1}] ✅ 登录动作已提交，等待页面刷新...")
         time.sleep(1)
         close_popups(driver)
 
         # --- 网页自动化交互逻辑 ---
         if is_tc_ui:
-            print(f"[{i + 1}] 🌐 [语言切换]: 正在切换为 繁中...")
+            safe_print(f"[{i + 1}] 🌐 [语言切换]: 正在切换为 繁中...")
             lang_container = WebDriverWait(driver, 3).until(
                 EC.presence_of_element_located((By.CLASS_NAME, "language-container")))
             driver.execute_script("arguments[0].click();", lang_container)
@@ -397,7 +424,7 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             driver.execute_script("arguments[0].click();", tc_option)
             time.sleep(1.5)
         else:
-            print(f"[{i + 1}] 🌐 [语言切换]: 正在切换为 英文 (默认)...")
+            safe_print(f"[{i + 1}] 🌐 [语言切换]: 正在切换为 英文 (默认)...")
             lang_container = WebDriverWait(driver, 3).until(
                 EC.presence_of_element_located((By.CLASS_NAME, "language-container")))
             driver.execute_script("arguments[0].click();", lang_container)
@@ -414,7 +441,7 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             file_input.send_keys(file_path)
             time.sleep(1)
         else:
-            print(f"[{i + 1}] 📄 [跳过]: 纯文本模式，无需上传文件。")
+            safe_print(f"[{i + 1}] 📄 [跳过]: 纯文本模式，无需上传文件。")
 
         # 【核心对齐】使用 JavaScript 强行清空原文本并注入，完美兼容前端框架
         try:
@@ -425,13 +452,13 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             driver.execute_script("arguments[0].value = arguments[1];", text_area, question_text)
             driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", text_area)
             driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", text_area)
-            print(f"[{i + 1}] ✅ [JS 注入成功]: 已成功在后台写入问题文本。")
+            safe_print(f"[{i + 1}] ✅ [JS 注入成功]: 已成功在后台写入问题文本。")
             time.sleep(1)
         except Exception as input_err:
-            print(f"[{i + 1}] ❌ 输入问题文本时发生异常: {input_err}")
+            safe_print(f"[{i + 1}] ❌ 输入问题文本时发生异常: {input_err}")
             raise input_err
 
-        print(f"[{i + 1}] 🔍 [通用步骤]: 正在点击设置齿轮图标...")
+        safe_print(f"[{i + 1}] 🔍 [通用步骤]: 正在点击设置齿轮图标...")
         gear_btn = WebDriverWait(driver, 5).until(
             EC.presence_of_element_located((By.XPATH, "//i[contains(@class, 'bi-gear-fill')]")))
         driver.execute_script("arguments[0].click();", gear_btn)
@@ -441,38 +468,38 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
         last_err = None
         for candidate in search_candidates:
             try:
-                print(f"[{i + 1}] 👉 正在尝试选中 Agent: '{candidate}' ...")
+                safe_print(f"[{i + 1}] 👉 正在尝试选中 Agent: '{candidate}' ...")
                 execute_state(driver, CURRENT_STATE, candidate)
                 agent_success = True
-                print(f"[{i + 1}] ✅ 成功找到并应用 Agent: '{candidate}'")
+                safe_print(f"[{i + 1}] ✅ 成功找到并应用 Agent: '{candidate}'")
                 break
             except Exception as e:
-                print(f"[{i + 1}] ⚠️ 当前网站未找到 '{candidate}'，准备尝试下一个候选词...")
+                safe_print(f"[{i + 1}] ⚠️ 当前网站未找到 '{candidate}'，准备尝试下一个候选词...")
                 last_err = e
 
         # 【核心对齐】如果列表里的词全都试过了还是不行，自动降级为 State 2
         if not agent_success:
-            print(
+            safe_print(
                 f"[{i + 1}] ⚠️ [保底机制触发]: 所有候选 Agent {search_candidates} 均无法找到！已自动降级为 State 2 (通用自动模式)。")
             CURRENT_STATE = "2"
             target_agent = str(target_agent) + " (未找到，降级为 State 2)"
             execute_state(driver, CURRENT_STATE)
 
-        print(f"[{i + 1}] 🔍 [通用步骤]: 面板配置完毕，正在点击 Apply Settings...")
+        safe_print(f"[{i + 1}] 🔍 [通用步骤]: 面板配置完毕，正在点击 Apply Settings...")
         apply_btn = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.ID, "global-settings-apply-btn")))
         driver.execute_script("arguments[0].click();", apply_btn)
         time.sleep(1)
 
-        print(f"[{i + 1}] 🚀 [通用步骤]: 正在点击发送/生成按钮...")
+        safe_print(f"[{i + 1}] 🚀 [通用步骤]: 正在点击发送/生成按钮...")
         submit_btn = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.XPATH, "//button[contains(@class, 'btn-enter')]")))
         driver.execute_script("arguments[0].click();", submit_btn)
 
         handle_post_send(driver, CURRENT_STATE)
-        print(f"[{i + 1}] ✅ 已成功进入自动生成等待环节...")
+        safe_print(f"[{i + 1}] ✅ 已成功进入自动生成等待环节...")
 
-        print(f"[{i + 1}] ⏳ 正在智能监控 AI 生成进度...")
+        safe_print(f"[{i + 1}] ⏳ 正在智能监控 AI 生成进度...")
         smart_sleep(5)
         last_length = 0
         stable_count = 0
@@ -481,17 +508,17 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
 
         for _ in range(max_wait_loops):
             if STOP_SCRIPT:
-                print(f"[{i + 1}] 🛑 收到中止指令，立即停止网页监控！")
+                safe_print(f"[{i + 1}] 🛑 收到中止指令，立即停止网页监控！")
                 break
             try:
                 _ = driver.window_handles
             except Exception:
-                print(f"\n[{i + 1}] 🚨 监控期间侦测到浏览器窗口被关闭，立即退出！")
+                safe_print(f"\n[{i + 1}] 🚨 监控期间侦测到浏览器窗口被关闭，立即退出！")
                 break
             time.sleep(1)
             current_length = 0
             try:
-                # 【核心对齐】使用 reversed 遍历，并采用 get_attribute("innerText") 防止截断
+                # 使用 reversed 遍历，并采用 get_attribute("innerText") 防止截断
                 previews = driver.find_elements(By.ID, "preview")
                 for p in reversed(previews):
                     if p.is_displayed():
@@ -508,20 +535,23 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             last_length = current_length
 
             if stable_count >= required_stable_seconds:
-                print(
+                safe_print(
                     f"[{i + 1}] ✅ 回答文本已连续 {required_stable_seconds} 秒无变化，判定生成彻底完成！最终字数: {current_length}")
                 break
         else:
             if not STOP_SCRIPT:
-                print(f"[{i + 1}] ⚠️ 警告：监控达到 300 秒上限，生成总时间超时！")
+                safe_print(f"[{i + 1}] ⚠️ 警告：监控达到 300 秒上限，生成总时间超时！")
                 timeout_status = "yes (总时间超时)"
+    except Exception as wait_error:
+        safe_print(f"[{i + 1}] ⚠️ 智能监控发生异常，强制继续执行: {wait_error}")
+        time.sleep(2)
 
         if STOP_SCRIPT:
             return
 
         current_page_url = driver.current_url
-        print(f"[{i + 1}] 🔗 已抓取当前回答shared link: {current_page_url}")
-        print(f"[{i + 1}] 📥 正在提取生成的回答并读取原文件...")
+        safe_print(f"[{i + 1}] 🔗 已抓取当前回答shared link: {current_page_url}")
+        safe_print(f"[{i + 1}] 📥 正在提取生成的回答并读取原文件...")
 
         def get_valid_preview(d):
             try:
@@ -543,13 +573,13 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
         # 将 60 秒的死等，拆解成 60 次 1 秒的循环，每次循环都检查是否按下了 Ctrl+C
         while wait_time < max_wait_time:
             if STOP_SCRIPT:
-                print(f"[{i + 1}] 🛑 收到中止指令，立即中断提取动作！")
+                safe_print(f"[{i + 1}] 🛑 收到中止指令，立即中断提取动作！")
                 return
 
             try:
                 res = get_valid_preview(driver)
                 if res == "BROWSER_CLOSED":
-                    print(f"[{i + 1}] 🚨 提取内容时侦测到浏览器已关闭，终止当前任务！")
+                    safe_print(f"[{i + 1}] 🚨 提取内容时侦测到浏览器已关闭，终止当前任务！")
                     return
                 if res:  # 如果成功抓到了文字
                     answer_text = res
@@ -561,9 +591,9 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             wait_time += 1
 
         if not answer_text or not answer_text.strip():
-            print(f"[{i + 1}] ⚠️ 警告：等待 60 秒后依然未抓取到内容！")
+            safe_print(f"[{i + 1}] ⚠️ 警告：等待 60 秒后依然未抓取到内容！")
             debug_previews = driver.find_elements(By.ID, "preview")
-            print(f"[{i + 1}] 🔍 调试信息：当前页面共有 {len(debug_previews)} 个 ID 为 preview 的元素。")
+            safe_print(f"[{i + 1}] 🔍 调试信息：当前页面共有 {len(debug_previews)} 个 ID 为 preview 的元素。")
 
             answer_text = "提取文本失败/为空"
             if timeout_status == "No":
@@ -571,7 +601,7 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             else:
                 timeout_status += " & yes (生成超时)"
         else:
-            print(f"[{i + 1}] ✅ 成功提取到回答，长度: {len(answer_text)} 字符")
+            safe_print(f"[{i + 1}] ✅ 成功提取到回答，长度: {len(answer_text)} 字符")
 
         prep_time = "N/A"
         comp_time = "N/A"
@@ -583,9 +613,9 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             if prep_match: prep_time = prep_match.group(1).replace(" ", "")
             comp_match = re.search(r'(?:Time of completion|完成時長)[^\d]*([\d\.]+s?)', page_text, re.IGNORECASE)
             if comp_match: comp_time = comp_match.group(1).replace(" ", "")
-            print(f"[{i + 1}] ⏱️ 提取时间成功 -> 准备耗时: {prep_time}, 完成耗时: {comp_time}")
+            safe_print(f"[{i + 1}] ⏱️ 提取时间成功 -> 准备耗时: {prep_time}, 完成耗时: {comp_time}")
         except Exception as time_err:
-            print(f"[{i + 1}] ⚠️ 提取时间信息时发生小错误，已跳过: {time_err}")
+            safe_print(f"[{i + 1}] ⚠️ 提取时间信息时发生小错误，已跳过: {time_err}")
 
         if is_text_only:
             file_content = "【无原始文档，用户仅提供了纯文本提问，请仅根据问题本身评估回答是否准确且符合逻辑】"
@@ -593,7 +623,7 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             file_content = read_file_content(file_path)
 
         if "yes" in timeout_status.lower():
-            print(f"[{i + 1}] ⚠️ 侦测到超时，跳过 DeepSeek 评价，直接记录为超时失败...")
+            safe_print(f"[{i + 1}] ⚠️ 侦测到超时，跳过 DeepSeek 评价，直接记录为超时失败...")
             eval_results = {
                 "tester_expectation": "Failed",
                 "input_language": "N/A",
@@ -604,7 +634,7 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
                 "document_contain_citations": "None"
             }
         else:
-            print(f"[{i + 1}] 🤖 成功提取网页回答，正在等待 DeepSeek 进行语言检测与质量评价...")
+            safe_print(f"[{i + 1}] 🤖 成功提取网页回答，正在等待 DeepSeek 进行语言检测与质量评价...")
             eval_results = evaluate_with_deepseek(question_text, file_content, answer_text, target_language)
 
         tester_exp = eval_results.get("tester_expectation", "Unknown")
@@ -638,9 +668,9 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
                     ws.cell(row=target_row, column=col_index, value=value)
                 wb.save(excel_path)
                 CONSECUTIVE_CLOSES = 0
-                print(f"[{i + 1}] ✅ 评价结果已成功写入 Excel 文件。")
+                safe_print(f"[{i + 1}] ✅ 评价结果已成功写入 Excel 文件。")
             except Exception as excel_err:
-                print(f"[{i + 1}] ❌ 写入 Excel 时失败: {excel_err}")
+                safe_print(f"[{i + 1}] ❌ 写入 Excel 时失败: {excel_err}")
 
 
     except Exception as e:
@@ -652,21 +682,36 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             "not connected to devtools", "aborted", "invalid session id"
         ])
         if is_manually_closed:
-            print(f"[{i + 1}] 🚨 侦测到当前浏览器被手动关闭！任务立即跳出（无 20 秒等待）。")
+            safe_print(f"[{i + 1}] 🚨 侦测到当前浏览器被手动关闭！任务立即跳出（无 20 秒等待）。")
             # 加锁计数，防止多个窗口同时关闭时数字算错
             with excel_write_lock:
                 CONSECUTIVE_CLOSES += 1
                 # 如果连续强关的次数达到了当前最大并发数，判定为“一口气全关了”
                 if CONSECUTIVE_CLOSES >= MAX_WORKERS and not STOP_SCRIPT:
-                    print("\n🛑 [全局拦截] 侦测到一口气关闭了所有窗口，判定为终止指令，脚本结束！")
+                    safe_print("\n🛑 [全局拦截] 侦测到一口气关闭了所有窗口，判定为终止指令，脚本结束！")
                     STOP_SCRIPT = True
         else:
-            print(f"[{i + 1}] ❌ 处理 {filename} 时发生代码逻辑错误: {e}")
+            safe_print(f"[{i + 1}] ❌ 处理 {filename} 时发生代码逻辑错误: {e}")
             with excel_write_lock:
-                CONSECUTIVE_CLOSES = 0  # 👈 普通报错也重置计数，防止误判
+                try:
+                    wb = openpyxl.load_workbook(excel_path)
+                    ws = wb.active
+                    # 在对应的行号记录下崩溃信息
+                    ws.cell(row=i + 2, column=1, value=i + 1)  # label
+                    ws.cell(row=i + 2, column=2, value=question_text)  # Request
+                    ws.cell(row=i + 2, column=3, value="Failed")  # Tester Expectation
+                    ws.cell(row=i + 2, column=4, value=filename if filename else "")  # filename
+                    ws.cell(row=i + 2, column=5, value=target_language if target_language else "N/A")
+                    ws.cell(row=i + 2, column=11, value=f"⚠️ 自动化执行崩溃: {str(e)[:150]}")  # DeepSeek评价列填入报错信息
+                    ws.cell(row=i + 2, column=12, value=target_agent if target_agent else "未指定")
+                    ws.cell(row=i + 2, column=17, value="Crash (Error)")  # Timeout_States列
+                    wb.save(excel_path)
+                    CONSECUTIVE_CLOSES = 0
+                except Exception as backup_err:
+                    safe_print(f"[{i + 1}] ❌ 紧急写入报错信息至 Excel 失败: {backup_err}")  # 👈 普通报错也重置计数，防止误判
             # 只有普通的逻辑报错，才会执行 20 秒保留现场
             if not STOP_SCRIPT:
-                print(f"[{i + 1}] ⏸️ 任务报错，保留浏览器现场 20 秒供排查...")
+                safe_print(f"[{i + 1}] ⏸️ 任务报错，保留浏览器现场 20 秒供排查...")
                 smart_sleep(20)
 
     finally:
