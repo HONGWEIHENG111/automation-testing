@@ -21,7 +21,7 @@ def generate_summary_csv(excel_path, output_csv_path):
         return
 
     # 1. Overall Test Result Summary (只要 Language Failed 或 Tester 覺得 Failed/Poor 就判定為 Failed)
-    timeout_mask = df.get('timeout_States', pd.Series(['No'] * len(df))).astype(str).str.contains('yes', case=False,
+    timeout_mask = df.get('Timeout_States', pd.Series(['No'] * len(df))).astype(str).str.contains('yes', case=False,
                                                                                                   na=False)
     valid_total_tests = total_tests - timeout_mask.sum()  # 非超时任务的有效总数
     failed_mask = ((df['Language Overall Status'].astype(str).str.contains('Failed', na=False, case=False)) | \
@@ -39,7 +39,7 @@ def generate_summary_csv(excel_path, output_csv_path):
         # 排除掉无效评价，只把有实质评价的内容喂给大模型
         if eval_text and eval_text not in ['Unknown', 'nan']:
             # 截短回答以节省 token
-            short_ans = ans_text[:150].replace('\n', ' ')
+            short_ans = ans_text[:300].replace('\n', ' ')
             eval_data.append(f"[Test ID: {idx + 1}] Eval: {eval_text} | Ans: {short_ans}")
 
     all_evals_text = "\n".join(eval_data)
@@ -76,14 +76,14 @@ def generate_summary_csv(excel_path, output_csv_path):
 
     # 提取語言錯誤的回答樣本 (新增傳入 Test ID)
     lang_failed_mask = df['Language Overall Status'].astype(str).str.contains('Failed', case=False, na=False)
-    timeout_mask = ~df.get('timeout_States', pd.Series(['No'] * len(df))).astype(str).str.contains('yes', case=False,
+    timeout_mask = ~df.get('Timeout_States', pd.Series(['No'] * len(df))).astype(str).str.contains('yes', case=False,
                                                                                                    na=False)
 
     lang_failed_samples = df[lang_failed_mask & timeout_mask][
         ['Input Language', 'Output Language', 'answer']].dropna().head(50)
     lang_failed_text = "\n".join(
         [
-            f"[Test ID: {idx + 1}] Input: {row['Input Language']}, Output: {row['Output Language']} | Answer: {str(row['answer'])[:150]}"
+            f"[Test ID: {idx + 1}] Input: {row['Input Language']}, Output: {row['Output Language']} | Answer: {str(row['answer'])[:300]}"
             for idx, row in lang_failed_samples.iterrows()])
 
     # 將 tags 的統計格式化，保證 LLM 輸出準確的數量，避免幻覺
@@ -148,9 +148,10 @@ def generate_summary_csv(excel_path, output_csv_path):
         full_response = response.choices[0].message.content.strip()
 
         # 解析三個模塊
-        block1_match = re.search(r'---BLOCK1_START---\n(.*?)\n---BLOCK1_END---', full_response, re.DOTALL)
-        block2_match = re.search(r'---BLOCK2_START---\n(.*?)\n---BLOCK2_END---', full_response, re.DOTALL)
-        block3_match = re.search(r'---BLOCK3_START---\n(.*?)\n---BLOCK3_END---', full_response, re.DOTALL)
+        # 将原先的 \n 替换为 \s*
+        block1_match = re.search(r'---BLOCK1_START---\s*(.*?)\s*---BLOCK1_END---', full_response, re.DOTALL)
+        block2_match = re.search(r'---BLOCK2_START---\s*(.*?)\s*---BLOCK2_END---', full_response, re.DOTALL)
+        block3_match = re.search(r'---BLOCK3_START---\s*(.*?)\s*---BLOCK3_END---', full_response, re.DOTALL)
 
         # ================= 從這裡開始是替換的內容 (新增計算函數) =================
 
@@ -231,8 +232,8 @@ def generate_summary_csv(excel_path, output_csv_path):
     meta_info_lines = [
         "System Login & Generation Info,,,",
         f"Login Website,{HOME_URL},,",
-        f"Login Account,{USERNAME},,",
-        f"Login Password,{PASSWORD},,",
+        #f"Login Account,{USERNAME},,",
+        #f"Login Password,{PASSWORD},,",
         f"Generation Time,{current_time_str},,",
         ",,,"  # 空行分隔线
     ]
@@ -283,9 +284,9 @@ def generate_summary_csv(excel_path, output_csv_path):
     ]
     # ================= Timeout 測試部分 =================
     # ================= Timeout 測試部分 =================
-    if 'timeout_States' in df.columns:
+    if 'Timeout_States' in df.columns:
         # 1. 宏观超时判定 (只要有 yes 就是超时)
-        timeout_mask = df['timeout_States'].astype(str).str.contains('yes', case=False, na=False)
+        timeout_mask = df['Timeout_States'].astype(str).str.contains('yes', case=False, na=False)
         timeout_count = timeout_mask.sum()
         no_timeout_count = total_tests - timeout_count
 
@@ -296,13 +297,13 @@ def generate_summary_csv(excel_path, output_csv_path):
         no_timeout_ids_str = ", ".join(map(str, no_timeout_ids.tolist())) if no_timeout_count > 0 else "None"
 
         # 2. 细分：总时间超时的数量与号数
-        total_timeout_mask = df['timeout_States'].astype(str).str.contains('总时间超时', na=False)
+        total_timeout_mask = df['Timeout_States'].astype(str).str.contains('总时间超时', na=False)
         total_time_out = total_timeout_mask.sum()
         total_timeout_ids = df[total_timeout_mask].index + 1
         total_timeout_ids_str = ", ".join(map(str, total_timeout_ids.tolist())) if total_time_out > 0 else "None"
 
         # 3. 细分：生成超时的数量与号数
-        gen_timeout_mask = df['timeout_States'].astype(str).str.contains('生成超时', na=False)
+        gen_timeout_mask = df['Timeout_States'].astype(str).str.contains('生成超时', na=False)
         gen_time_out = gen_timeout_mask.sum()
         gen_timeout_ids = df[gen_timeout_mask].index + 1
         gen_timeout_ids_str = ", ".join(map(str, gen_timeout_ids.tolist())) if gen_time_out > 0 else "None"
