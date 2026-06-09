@@ -2,9 +2,15 @@ import json
 from openai import OpenAI
 from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL
 import time
-
+import random
 deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+import re
+from threading import Lock
+EVAL_PRINT_LOCK = Lock()
 
+def safe_eval_print(*args, **kwargs):
+    with EVAL_PRINT_LOCK:
+        print(*args, **kwargs)
 def evaluate_with_deepseek(question_text: str, file_content: str, answer_text: str, target_language: str) -> dict:
     """
     调用 DeepSeek API 对系统回答进行评估，并返回结构化的字典结果。
@@ -56,7 +62,7 @@ def evaluate_with_deepseek(question_text: str, file_content: str, answer_text: s
 {target_language}
 
 【原始文档内容】（部分）：
-{file_content[:8000]}
+{file_content[:50000]}
 
 【系统生成的回答】：
 {answer_text}
@@ -73,12 +79,22 @@ def evaluate_with_deepseek(question_text: str, file_content: str, answer_text: s
                 ]
             )
             raw_result = ds_response.choices[0].message.content
-            clean_result = raw_result.replace("```json", "").replace("```", "").strip()
+            match = re.search(r'\{.*\}', raw_result, re.DOTALL)
+            if match:
+                clean_result = match.group(0)
+                return json.loads(clean_result)
+            else:
+                raise ValueError("未能找到 JSON 结构")
             return json.loads(clean_result)
         except Exception as e:
-            print(f"⚠️ 第 {attempt + 1} 次调用 DeepSeek 失败: {e}")
+            safe_eval_print(f"⚠️ 第 {attempt + 1} 次调用 DeepSeek 失败: {e}")
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)  # 依次等待 1s, 2s 然后重试
+                # 👇 核心优化：增加基础等待时间，并加入随机抖动打散并发请求 👇
+                base_wait = 2 ** (attempt + 1)  # 第一次等 2秒，第二次等 4秒
+                jitter = random.uniform(0.5, 2.0)  # 加上 0.5 到 2 秒的随机误差
+                wait_time = base_wait + jitter
+                print(f"   ⏳ 触发防并发限流机制，等待 {wait_time:.2f} 秒后重试...")
+                time.sleep(wait_time)
             else:
                 # 如果解析失败，返回带有错误信息的默认字典结构
                 return {
