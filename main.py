@@ -136,20 +136,23 @@ def get_test_data_from_excel(excel_path):
                         if is_language_column:
                             header_row = cell.row
                             language_col = cell.column
-            # 如果两个表头都找到了，就跳出循环
-            if request_col and agent_col:
+            # 只要发现了 Request 或 Filename 任意一个核心锚点，就确认是表头并跳出扫描。
+            # 这样既不会被可能在第一行出现的随机备注（如 "默认Language"）骗到，也能完整扫描完这一行的所有列。
+            if request_col is not None or filename_col is not None:
                 break
 
-        if not request_col:
-            print(f"[致命错误] 在 Excel({excel_path}) 中找不到 'Request' 表头！")
+        if not request_col and not filename_col:
+            print(f"[致命错误] 在 Excel({excel_path}) 中找不到 'Request' 也找不到 'Filename' 表头！无法提供任何测试输入。")
             return questions, selected_agents, filenames, selected_languages
 
         if not filename_col:
-            print(f"[致命错误] 在 Excel({excel_path}) 中找不到 'filename' 表头！无法进行文件匹配。")
-            return questions, selected_agents, filenames, selected_languages
+            print(f"[降级提示] 找不到 'Filename' 表头，将自动降级为【纯文本模式】运行。")
 
         if not agent_col:
-            print(f"[警告] 找不到 'Selected Agent' 表头，Agent 列表将返回空值。")
+            print(f"[降级提示] 找不到 'Selected Agent' 表头，将自动降级为【状态 2 (通用自动模式)】。")
+
+        if not language_col:
+            print(f"[降级提示] 找不到 'Language' 表头，将自动使用【英文 (默认)】。")
 
         for row in range(header_row + 1, ws.max_row + 1):
             req_val = ws.cell(row=row, column=request_col).value if request_col else ""
@@ -161,7 +164,7 @@ def get_test_data_from_excel(excel_path):
             # 只要 Request 不为空 或者 Filename 不为空，就认为这是一条有效数据
             if req_str or file_str:
                 questions.append(req_str)
-
+                filenames.append(file_str)
                 # 读取对应的 Agent
                 if agent_col:
                     agent_val = ws.cell(row=row, column=agent_col).value
@@ -169,8 +172,6 @@ def get_test_data_from_excel(excel_path):
                 else:
                     selected_agents.append("")
 
-                # 记录 Filename
-                filenames.append(file_str)
                 # 读取对应的 Language
                 if language_col:
                     lang_val = ws.cell(row=row, column=language_col).value
@@ -351,12 +352,9 @@ def run_automation():
     情况9：无request，有selected agent， 无filename，报错并且跳过进行下一项
     情况10：无request，无selected agent，有filename（且test中有对应文件），按照状态2运行
     情况11：无request，无selected agent，有filename（且test中无对应文件），报错并且跳过进行下一项
-    情况12：情况11：无request，无selected agent，无filename，报错并且跳过进行下一项
+    情况12：无request，无selected agent，无filename，报错并且跳过进行下一项
     '''
-        # 按照 Excel 的行数顺序遍历执行
-        # ================= 全局默认状态 =================
-    DEFAULT_STATE = "4"  # 如果有文件，默认使用的状态。你可以随时在这里修改
-        # ================================================
+
         # 按照 Excel 的行数顺序遍历执行
     for i in range(len(questions)):
         if STOP_SCRIPT:
@@ -420,17 +418,30 @@ def run_automation():
         target_agent_raw = str(target_agent).strip() if target_agent else ""
         # ================= 拼写纠错与智能降级逻辑 =================
         if target_agent_raw and target_agent_raw not in ALL_VALID_AGENTS:
-            # 找不到完全匹配的，尝试进行相似度匹配 (0.6为容错率，可根据实际体验微调)
-            matches = difflib.get_close_matches(target_agent_raw, ALL_VALID_AGENTS, n=1, cutoff=0.6)
+            lower_agents_mapping = {agent.lower(): agent for agent in ALL_VALID_AGENTS}
+            target_agent_lower = target_agent_raw.lower()
 
-            if matches:
-                print(f"[{i + 1}] 🔧 [智能纠错]: 侦测到拼写错误 '{target_agent_raw}'，已自动纠正为合法的 '{matches[0]}'")
-                target_agent_raw = matches[0]  # 用正确的名字覆盖手误输入
-            else:
+            # 第一步防禦：嘗試「無視大小寫的精確匹配」（解決 ceo -> CEO, data analyst -> Data Analyst）
+            if target_agent_lower in lower_agents_mapping:
+                correct_name = lower_agents_mapping[target_agent_lower]
                 print(
-                    f"[{i + 1}] ⚠️ [降级警告]: 错得太离谱，无法识别 Agent '{target_agent_raw}'，自动降级为通用模式 (State 2)！")
-                target_agent_raw = ""  # 清空名字
-                CURRENT_STATE = "2"  # 强制降级为不选 Agent 的状态
+                    f"[{i + 1}] 🔧 [大小寫修正]: 偵測到大小寫不標準 '{target_agent_raw}'，已自動修正為 '{correct_name}'")
+                target_agent_raw = correct_name
+            else:
+                # 第二步防禦：如果大小寫一致也找不到，再走「無視大小寫的模糊匹配」（解決拼寫錯誤，如 data analist）
+                matches = difflib.get_close_matches(target_agent_lower, list(lower_agents_mapping.keys()), n=1,
+                                                    cutoff=0.6)
+
+                if matches:
+                    correct_name = lower_agents_mapping[matches[0]]
+                    print(
+                        f"[{i + 1}] 🔧 [智能糾錯]: 偵測到拼寫錯誤 '{target_agent_raw}'，已自動糾正為合法的 '{correct_name}'")
+                    target_agent_raw = correct_name  # 用正確的名字覆蓋
+                else:
+                    print(
+                        f"[{i + 1}] ⚠️ [降級警告]: 錯得太離譜，無法識別 Agent '{target_agent_raw}'，自動降級為通用模式 (State 2)！")
+                    target_agent_raw = ""  # 清空名字
+                    CURRENT_STATE = "2"  # 強制降級為不選 Agent 的狀態
         # ===================================================================
         # 判断当前的 UI 语言是否为繁中
         tc_keywords = ["繁中", "繁体", "繁體", "traditional chinese", "tc", "zh-tw"]
@@ -604,18 +615,18 @@ def run_automation():
             # 初始化当前用例的超时状态 ---
             timeout_status = "No"
             try:
-                time.sleep(5)  # 先强制等待 5 秒，让前端动画和网络请求先跑起来
+                smart_sleep(5)  # 先强制等待 5 秒，让前端动画和网络请求先跑起来
 
                 last_length = 0
                 stable_count = 0
-                max_wait_loops = 300  # 最大循环次数（约 400 秒，防止死循环）
-                required_stable_seconds = 5  # 允许中途卡顿 10 秒！可以根据实际情况调大
-                # 最多循环检测 60 次（约 200 秒超时限制）
+                max_wait_loops = 300  # 最大循环次数（约 300 秒，防止死循环）
+                required_stable_seconds = 5  # 允许中途卡顿 5 秒！可以根据实际情况调大
+                # 最多循环检测 60 次（约 300 秒超时限制）
                 for _ in range(max_wait_loops):
                     if STOP_SCRIPT:
                         print("🛑 收到中止指令，立即停止网页监控！")
                         break
-                    # 🌟监控途中检查浏览器状态，防止关闭后死等 400 秒
+                    # 🌟监控途中检查浏览器状态，防止关闭后死等 300 秒
                     try:
                         _ = driver.window_handles
                     except Exception:
@@ -669,7 +680,7 @@ def run_automation():
                 print("   ⏳ 正在等待并提取最新的可见回答 (最多等待 60 秒)...")
 
                 def get_valid_preview(d):
-                    # 🌟防止浏览器关闭后，WebDriverWait 在这里硬挺 80 秒
+                    # 🌟防止浏览器关闭后，WebDriverWait 在这里硬挺 60 秒
                     try:
                         _ = d.window_handles
                     except Exception:
@@ -816,7 +827,7 @@ def run_automation():
         # ================= 点击主页 Logo 返回 =================
             try:
                 print("   🏠 正在尝试通过点击 Logo 返回首页...")
-                #将等待时间缩短为 5 秒，找不到就赶紧刷新，不浪费时间
+                #将等待时间缩短为 7 秒，找不到就赶紧刷新，不浪费时间
                 home_btn = WebDriverWait(driver, 7).until(
                     EC.element_to_be_clickable((By.CLASS_NAME, "image-home"))
                 )
