@@ -239,10 +239,6 @@ def run_automation():
     if not questions:
         print("未提取到任何问题，程序终止。")
         return
-    if len(questions) != len(selected_agents):
-        print(
-            f"[致命错误] 提取到的问题数量({len(questions)})与 Agent 数量({len(selected_agents)})不一致！请检查 Excel 格式。")
-        return
     # 获取 test 文件夹中支持的文件，并进行【按文件名排序】
         # 严格按照网站报错提示的格式进行过滤
     valid_extensions = ('.pdf', '.docx', '.csv', '.txt')
@@ -252,7 +248,7 @@ def run_automation():
     test_files.sort()
 
     if len(test_files) != len(questions):
-        print(f"[警告] 文件夹中的文件数量 ({len(test_files)}) 与 Excel 中的问题数量 ({len(questions)}) 不匹配！")
+        print(f"文件夹中的文件数量 ({len(test_files)}) 与 Excel 中的问题数量 ({len(questions)}) 不匹配！")
 
     # 启动浏览器
     try:
@@ -264,7 +260,8 @@ def run_automation():
         chrome_options.add_argument('--disable-background-timer-throttling')
         chrome_options.add_argument('--disable-backgrounding-occluded-windows')
         chrome_options.add_argument('--disable-renderer-backgrounding')
-        # 注意：顺手帮你补上了 options=chrome_options，否则你原来的 detach 不会生效
+        # chrome_options.add_argument('--headless=new') #当完全没有问题之后可以使用这个无头模式，不用盯着界面看，节省70%内存，可以调高worknum
+        # chrome_options.add_argument('--disable-gpu')
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
         print("✅ 成功启动 Google Chrome！")
     except Exception as e_chrome:
@@ -336,7 +333,7 @@ def run_automation():
         ws = wb.active
         ws.title = "Evaluation Results"
             # 写入表头
-        ws.append(["label","Request","Tester Expectation", "filename", "Selected Language","Input Language", "Output Language", "Language Overall Status", "answer", "shared link", "DeepSeek评价内容", "Selected agent", "Reference Link", "Document Contain[1][2][3]", "Preparation Time", "Completion Time", "Timeout_States"])
+        ws.append(["label","Request","filename", "Crash", "Tester Expectation", "Selected Language","Input Language", "Output Language", "Language Overall Status", "answer", "shared link", "DeepSeek评价内容", "Selected agent", "Reference Link", "Document Contain[1][2][3]", "Preparation Time", "Completion Time", "Timeout_States"])
         wb.save(excel_path)
         print(f"📊 已创建评价结果 Excel 文件: {excel_path}")
     # ===============================================================
@@ -439,7 +436,7 @@ def run_automation():
                     target_agent_raw = correct_name  # 用正確的名字覆蓋
                 else:
                     print(
-                        f"[{i + 1}] ⚠️ [降級警告]: 錯得太離譜，無法識別 Agent '{target_agent_raw}'，自動降級為通用模式 (State 2)！")
+                        f"[{i + 1}] ⚠️ [降級警告]: 拼写错误离谱，无法识别 Agent '{target_agent_raw}'，自動降級為通用模式 (State 2)！")
                     target_agent_raw = ""  # 清空名字
                     CURRENT_STATE = "2"  # 強制降級為不選 Agent 的狀態
         # ===================================================================
@@ -545,7 +542,16 @@ def run_automation():
                 driver.execute_script("arguments[0].value = arguments[1];", text_area, question_text)
 
                 # 4. 关键核心：向输入框连续派发 input 和 change 事件，确保 Vue/React 等前端框架能抓取到新数据
-                driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", text_area)
+                driver.execute_script("""
+                    var input = arguments[0];
+                    var lastValue = input.value;
+                    input.value = arguments[1];
+                    var event = new Event('input', { bubbles: true });
+                    // 破解 React 16+ 内部的值追踪器
+                    var tracker = input._valueTracker;
+                    if (tracker) { tracker.setValue(lastValue); }
+                    input.dispatchEvent(event);
+                """, text_area, question_text)
                 driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", text_area)
 
                 print("   ✅ 已成功在后台写入问题文本。")
@@ -564,31 +570,27 @@ def run_automation():
             time.sleep(0.5)
 
             # ================= 根据不同状态执行完全独立的点击逻辑 =================
-            agent_success = False
-            last_err = None
+            if search_candidates:
+                agent_success = False
+                last_err = None
+                for candidate in search_candidates:
+                    try:
+                        print(f"   👉 正在尝试选中 Agent: '{candidate}' ...")
+                        execute_state(driver, CURRENT_STATE, candidate)
+                        agent_success = True
+                        print(f"   ✅ 成功找到并应用 Agent: '{candidate}'")
+                        break
+                    except Exception as e:
+                        print(f"   ⚠️ 当前网站未找到 '{candidate}'，准备尝试下一个候选词...")
+                        last_err = e
 
-            # 【核心改动】遍历候选列表，搜不到就自动搜下一个
-            for candidate in search_candidates:
-                try:
-                    print(f"   👉 正在尝试选中 Agent: '{candidate}' ...")
-                    execute_state(driver, CURRENT_STATE, candidate)
-                    agent_success = True
-                    print(f"   ✅ 成功找到并应用 Agent: '{candidate}'")
-                    break  # 只要成功选中一个，立刻跳出循环，继续后续流程
-                except Exception as e:
-                    print(f"   ⚠️ 当前网站未找到 '{candidate}'，准备尝试下一个候选词...")
-                    last_err = e
-
-            # 如果列表里的词全都试过了还是不行，抛出异常，让外层捕获并直接跳过当前用例
-            if not agent_success:
-                print(
-                    f"   ⚠️ [保底机制触发]: 所有候选 Agent {search_candidates} 均无法找到！已自动降级为 State 2 (通用自动模式)。")
-                CURRENT_STATE = "2"
-
-                # 修改 target_agent 变量，以便最终写入 Excel 时能够溯源
-                target_agent = str(target_agent) + " (未找到，降级为 State 2)"
-
-                # 重新调用状态 2 的 UI 配置，切回到 Agent Finder Mode 并开启 Auto
+                if not agent_success:
+                    print(f"   ⚠️ [保底机制触发]: 候选 Agent {search_candidates} 均无法找到！已自动降级为 State 2。")
+                    CURRENT_STATE = "2"
+                    target_agent = str(target_agent) + " (未找到，降级为 State 2)"
+                    execute_state(driver, CURRENT_STATE)
+            else:
+                print("   ℹ️ 目标 Agent 为空，直接应用通用模式 (State 2)...")
                 execute_state(driver, CURRENT_STATE)
 
         # Apply settings
@@ -718,24 +720,95 @@ def run_automation():
                         timeout_status += " & yes (生成超时)"
                 else:
                     print(f"   ✅ 成功提取到回答，长度: {len(answer_text)} 字符")
+
                 prep_time = "N/A"
                 comp_time = "N/A"
                 try:
-                # 获取整个页面的纯文本（无视复杂的 HTML 标签嵌套）
-                    time.sleep(1)
-                    page_text = driver.find_element(By.TAG_NAME, "body").get_attribute("innerText") or ""
+                    # 1. 强制等待 3 秒，等组件完全挂载到 React 树上
+                    time.sleep(3)
 
-                # 用正则精准捕获数字和单位 (例如 "1s", "182.8s")
-                    prep_match = re.search(r'(?:Time of preparation|準備時長:)[^\d]*([\d\.]+s?)', page_text,
-                                   re.IGNORECASE)
-                    if prep_match: prep_time = prep_match.group(1).replace(" ", "")
+                    # 2. 注入核弹级 JS：全方位透视 DOM 与 React 底层内存树
+                    times_info = driver.execute_script("""
+                                    try {
+                                        var prep = 'N/A', comp = 'N/A';
+                                        var debugLog = [];
+                                        // 锁定我们要找的滚动组件标签
+                                        var flows = document.querySelectorAll('number-flow-react, number-flow');
+                                        debugLog.push('找到标签数: ' + flows.length);
+                                        var vals = [];
+    
+                                        for(var i=0; i<flows.length; i++) {
+                                            var el = flows[i];
+                                            var val = null;
+    
+                                            // 第一层：尝试常规 DOM 属性
+                                            if (el.value !== undefined) val = el.value;
+                                            else if (el.getAttribute('value')) val = el.getAttribute('value');
+                                            else if (el.getAttribute('aria-valuenow')) val = el.getAttribute('aria-valuenow');
+    
+                                            // 第二层：入侵 React 16-18+ 的 Fiber 内存树，向上回溯寻找 memoizedProps
+                                            if (val == null) {
+                                                var fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                                                if (fiberKey) {
+                                                    var curr = el[fiberKey];
+                                                    // 向上回溯 5 层，寻找包含 value 变量的节点
+                                                    for (var j=0; j<5; j++) {
+                                                        if (curr && curr.memoizedProps && curr.memoizedProps.value !== undefined) {
+                                                            val = curr.memoizedProps.value;
+                                                            debugLog.push('通过Fiber提取成功');
+                                                            break;
+                                                        }
+                                                        if (curr) curr = curr.return;
+                                                    }
+                                                }
+                                            }
+    
+                                            // 第三层：入侵 React 17+ 的 Props 内存
+                                            if (val == null) {
+                                                var propsKey = Object.keys(el).find(k => k.startsWith('__reactProps$'));
+                                                if (propsKey && el[propsKey] && el[propsKey].value !== undefined) {
+                                                    val = el[propsKey].value;
+                                                    debugLog.push('通过Props提取成功');
+                                                }
+                                            }
+    
+                                            if (val !== null) vals.push(val);
+                                        }
+    
+                                        if (vals.length >= 1) prep = vals[0] + 's';
+                                        if (vals.length >= 2) comp = vals[1] + 's';
+    
+                                        return { prep: prep, comp: comp, debug: debugLog.join(' | ') };
+                                    } catch(err) {
+                                        return { prep: 'N/A', comp: 'N/A', debug: 'JS报错: ' + err.message };
+                                    }
+                                """)
 
-                    comp_match = re.search(r'(?:Time of completion|完成時長)[^\d]*([\d\.]+s?)', page_text, re.IGNORECASE)
-                    if comp_match: comp_time = comp_match.group(1).replace(" ", "")
+                    if times_info:
+                        prep_time = times_info.get("prep", "N/A")
+                        comp_time = times_info.get("comp", "N/A")
+                        debug_info = times_info.get("debug", "")
 
-                    print(f"   ⏱️ 提取时间成功 -> 准备耗时: {prep_time}, 完成耗时: {comp_time}")
+                        # 第四层极限保底：如果连 React 内存里都没有，强行用正则刮取底层 HTML 代码
+                        if prep_time == "N/A":
+                            html = driver.execute_script("return document.body.innerHTML;")
+                            # 匹配类似 value="99.5" 的隐藏属性
+                            html_matches = re.findall(r'<number-flow[^>]*?(?:value|aria-valuenow)=["\']?([0-9.]+)["\']?',
+                                                      html, re.IGNORECASE)
+                            if len(html_matches) >= 1:
+                                prep_time = html_matches[0] + "s"
+                                debug_info += " | 触发底层HTML正则兜底"
+                            if len(html_matches) >= 2:
+                                comp_time = html_matches[1] + "s"
+
+                        print(
+                            f"[{i + 1}] ⏱️ 提取时间 -> 准备耗时: {prep_time}, 完成耗时: {comp_time} (底层诊断: {debug_info})")
+                    else:
+                        print(f"[{i + 1}] ⏱️ 提取失败：JS 脚本未返回任何数据。")
+
                 except Exception as time_err:
-                    print(f"   ⚠️ 提取时间信息时发生小错误，已跳过: {time_err}")
+                    print(f"[{i + 1}] ⚠️ 提取时间发生代码异常: {time_err}")
+
             # 2. 提取本地文档内容
                 if is_text_only:
                     file_content = "【无原始文档，用户仅提供了纯文本提问，请仅根据问题本身评估回答是否准确且符合逻辑】"
@@ -779,8 +852,9 @@ def run_automation():
                     ws.append([
                         i + 1,  # 填入 label 序号 (1, 2, 3...)
                         question_text,  # 原Request内容
-                        tester_exp,  # Tester Expectation
                         display_filename,  # 测试filename
+                        "No",  # Crash (第4列，正常情况写 No)
+                        tester_exp,  # Tester Expectation
                         display_target_language,
                         input_lang,  # Input Language
                         output_lang,  # Output Language
@@ -846,18 +920,103 @@ def run_automation():
                 # 留出一点时间让页面完全加载，准备迎接下一个文件
             time.sleep(1)
             close_popups(driver)
+            if (i + 1) % 50 == 0:
+                print(f"\n[{i + 1}] 🔄 触发内存保护：已连续运行 50 次，正在重启浏览器释放内存...")
+                try:
+                    driver.quit()
+                except:
+                    pass
+
+                # 1. 重新拉起干净的浏览器实例
+                driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+                driver.get(HOME_URL)
+                time.sleep(2)
+
+                # 2. 重新执行全自动登录逻辑
+                print(f"[{i + 1}] 🔑 正在为新浏览器重新执行登录...")
+                try:
+                    login_nav = WebDriverWait(driver, 10).until(
+                        EC.element_to_be_clickable((By.ID, "nav-login"))
+                    )
+                    driver.execute_script("arguments[0].click();", login_nav)
+
+                    username_input = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, "sso-username"))
+                    )
+                    password_input = driver.find_element(By.ID, "sso-password")
+
+                    driver.execute_script("arguments[0].value = arguments[1];", username_input, USERNAME)
+                    driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));",
+                                          username_input)
+                    driver.execute_script("arguments[0].value = arguments[1];", password_input, PASSWORD)
+                    driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));",
+                                          password_input)
+
+                    submit_btn = driver.find_element(By.CLASS_NAME, "sso-submit-btn")
+                    driver.execute_script("arguments[0].click();", submit_btn)
+
+                    close_popups(driver)
+                    print(f"[{i + 1}] ✅ 内存释放完毕，新浏览器登录成功，继续后续任务...")
+                    time.sleep(1)
+                    close_popups(driver)
+                except Exception as re_login_err:
+                    print(f"[{i + 1}] ❌ 重启浏览器后自动登录失败: {re_login_err}，终止后续任务。")
+                    break
         # ==================================================
 
         except Exception as e:
-            print(f"❌ [报错] 处理 {filename} 时发生错误: {e}")
+            print(f"❌ [报错] 处理 {filename if filename else '纯文本'} 时发生错误: {e}")
             error_msg = str(e).lower()
             if "window already closed" in error_msg or "target window already closed" in error_msg or "no such window" in error_msg:
                 print("🚨 侦测到浏览器窗口已被手动关闭，脚本放弃后续所有任务！")
                 break
+                # ================= 💡 新增：兜底写入 Excel 逻辑 =================
+            print("   📝 正在将崩溃记录写入 Excel，防止数据漏行...")
+            try:
+                wb = openpyxl.load_workbook(excel_path)
+                ws = wb.active
 
-            # 如果中间发生报错，最稳妥的重置方式是直接重新请求首页网址
-            driver.get(HOME_URL)
-            time.sleep(2)
+                # 容错处理：确保空值转为空字符串
+                display_filename = filename if filename else ""
+                display_target_language = target_language if target_language else "N/A"
+                safe_agent = target_agent if target_agent else "未指定"
+                crash_reason = f"Automation Crash: {str(e)[:150]}"
+                # 截断报错信息，防止过长撑爆 Excel 单元格
+                error_info = f"⚠️ 自动化执行崩溃: {str(e)[:150]}"
+
+                # 严格按照表头顺序，追加一行失败的“尸体”记录
+                ws.append([
+                        i + 1,  # label 序号
+                        question_text,  # Request
+                        display_filename,  # filename
+                        crash_reason,  # Crash (第4列，写入具体的报错原因)
+                        "Failed",  # Tester Expectation (强行判定为失败)
+                        display_target_language,  # Selected Language
+                        "N/A",  # Input Language
+                        "N/A",  # Output Language
+                        "Failed",  # Language Overall Status
+                        "【执行崩溃，未能生成回答】",  # answer
+                        "N/A",  # shared link
+                        error_info,  # DeepSeek评价内容 (巧妙利用这里记录报错原因)
+                        safe_agent,  # Selected agent
+                        "N/A",  # Reference Link
+                        "None",  # Document Contain[1][2][3]
+                        "N/A",  # Preparation Time
+                        "N/A",  # Completion Time
+                        "Crash (Error)"  # Timeout_States (标记为系统崩溃)
+                ])
+                wb.save(excel_path)
+                print("   ✅ 崩溃记录已成功保存，数据未流失。")
+            except Exception as excel_err:
+                print(f"   ❌ 紧急写入兜底记录至 Excel 时失败: {excel_err}")
+                # ==============================================================
+            # 记录完之后，执行现场清理，重新请求首页网址，准备迎接下一个循环
+            print("   🔄 正在清理现场并重新加载首页...")
+            try:
+                driver.get(HOME_URL)
+                time.sleep(2)
+            except Exception:
+                pass  # 如果连刷新都报错（比如浏览器死了），就让他进入下一轮被捕捉
 
     print("📊 正在生成最终的 Summary 报告...")
     try:
@@ -880,6 +1039,7 @@ def run_automation():
     while True:
         if STOP_SCRIPT:
             print("👋 侦测到 Ctrl+C 退出指令，控制台自动关闭！")
+            keyboard.unhook_all()
             break
         try:
             # 尝试获取窗口句柄，如果获取失败说明浏览器已经被你手动关闭了
