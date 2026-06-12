@@ -52,7 +52,7 @@ def listen_for_hotkey():
     # 阻塞等待按下 Ctrl+C
     keyboard.wait('ctrl+c')
     STOP_SCRIPT = True
-    print("\n\n🛑 [紧急刹车] 侦测到 Ctrl+C 键按下！脚本将在当前步骤跳出，并释放浏览器控制权...\n")
+    print("\n\n🛑 [紧急刹车] 侦测到 Ctrl+C 键（终止指令）按下！脚本将在当前步骤跳出，并释放浏览器控制权...\n")
 
 
 def smart_sleep(seconds):
@@ -244,7 +244,7 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
     global STOP_SCRIPT
     global CONSECUTIVE_CLOSES
     if STOP_SCRIPT:
-        safe_print(f"🛑 [任务 {i + 1}] 收到中止指令，停止处理。")
+        #safe_print(f"🛑 [任务 {i + 1}] 收到中止指令，停止处理。")
         return
 
     actual_file_name = None
@@ -310,7 +310,7 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
                 target_agent_raw = correct_name  # 用正確的名字覆蓋
             else:
                 safe_print(
-                    f"[{i + 1}] ⚠️ [降級警告]: 錯得太離譜，無法識別 Agent '{target_agent_raw}'，自動降級為通用模式 (State 2)！")
+                    f"[{i + 1}] ⚠️  [降級警告]: 拼写错误离谱， 无法识别Agent '{target_agent_raw}'，自動降級為通用模式 (State 2)！")
                 target_agent_raw = ""  # 清空名字
                 CURRENT_STATE = "2"  # 強制降級為不選 Agent 的狀態
     # ===================================================================
@@ -370,6 +370,8 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             chrome_options.add_argument('--disable-background-timer-throttling')
             chrome_options.add_argument('--disable-backgrounding-occluded-windows')
             chrome_options.add_argument('--disable-renderer-backgrounding')
+            #chrome_options.add_argument('--headless=new') #当完全没有问题之后可以使用这个无头模式，不用盯着界面看，节省70%内存，可以调高worknum
+            #chrome_options.add_argument('--disable-gpu')
             driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
         except Exception as e_chrome:
             safe_print(f"[{i + 1}] ⚠️ Chrome 启动失败: {e_chrome}")
@@ -450,7 +452,16 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
             )
             driver.execute_script("arguments[0].value = '';", text_area)
             driver.execute_script("arguments[0].value = arguments[1];", text_area, question_text)
-            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", text_area)
+            driver.execute_script("""
+                var input = arguments[0];
+                var lastValue = input.value;
+                input.value = arguments[1];
+                var event = new Event('input', { bubbles: true });
+                // 破解 React 16+ 内部的值追踪器
+                var tracker = input._valueTracker;
+                if (tracker) { tracker.setValue(lastValue); }
+                input.dispatchEvent(event);
+            """, text_area, question_text)
             driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", text_area)
             safe_print(f"[{i + 1}] ✅ [JS 注入成功]: 已成功在后台写入问题文本。")
             time.sleep(1)
@@ -464,25 +475,28 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
         driver.execute_script("arguments[0].click();", gear_btn)
         time.sleep(0.5)
 
-        agent_success = False
-        last_err = None
-        for candidate in search_candidates:
-            try:
-                safe_print(f"[{i + 1}] 👉 正在尝试选中 Agent: '{candidate}' ...")
-                execute_state(driver, CURRENT_STATE, candidate)
-                agent_success = True
-                safe_print(f"[{i + 1}] ✅ 成功找到并应用 Agent: '{candidate}'")
-                break
-            except Exception as e:
-                safe_print(f"[{i + 1}] ⚠️ 当前网站未找到 '{candidate}'，准备尝试下一个候选词...")
-                last_err = e
+        if search_candidates:
+            agent_success = False
+            last_err = None
+            for candidate in search_candidates:
+                try:
+                    safe_print(f"[{i + 1}] 👉 正在尝试选中 Agent: '{candidate}' ...")
+                    execute_state(driver, CURRENT_STATE, candidate)
+                    agent_success = True
+                    safe_print(f"[{i + 1}] ✅ 成功找到并应用 Agent: '{candidate}'")
+                    break
+                except Exception as e:
+                    safe_print(f"[{i + 1}] ⚠️ 当前网站未找到 '{candidate}'，准备尝试下一个候选词...")
+                    last_err = e
 
-        # 【核心对齐】如果列表里的词全都试过了还是不行，自动降级为 State 2
-        if not agent_success:
-            safe_print(
-                f"[{i + 1}] ⚠️ [保底机制触发]: 所有候选 Agent {search_candidates} 均无法找到！已自动降级为 State 2 (通用自动模式)。")
-            CURRENT_STATE = "2"
-            target_agent = str(target_agent) + " (未找到，降级为 State 2)"
+            if not agent_success:
+                safe_print(
+                    f"[{i + 1}] ⚠️ [保底机制触发]: 候选 Agent {search_candidates} 均无法找到！已自动降级为 State 2。")
+                CURRENT_STATE = "2"
+                target_agent = str(target_agent) + " (未找到，降级为 State 2)"
+                execute_state(driver, CURRENT_STATE)
+        else:
+            safe_print(f"[{i + 1}] ℹ️ 目标 Agent 为空，直接应用通用模式 (State 2)...")
             execute_state(driver, CURRENT_STATE)
 
         safe_print(f"[{i + 1}] 🔍 [通用步骤]: 面板配置完毕，正在点击 Apply Settings...")
@@ -498,53 +512,53 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
 
         handle_post_send(driver, CURRENT_STATE)
         safe_print(f"[{i + 1}] ✅ 已成功进入自动生成等待环节...")
+        try:
+            safe_print(f"[{i + 1}] ⏳ 正在智能监控 AI 生成进度...")
+            smart_sleep(5)
+            last_length = 0
+            stable_count = 0
+            max_wait_loops = 300
+            required_stable_seconds = 5
 
-        safe_print(f"[{i + 1}] ⏳ 正在智能监控 AI 生成进度...")
-        smart_sleep(5)
-        last_length = 0
-        stable_count = 0
-        max_wait_loops = 300
-        required_stable_seconds = 5
+            for _ in range(max_wait_loops):
+                if STOP_SCRIPT:
+                    safe_print(f"[{i + 1}] 🛑 收到中止指令，立即停止网页监控！")
+                    break
+                try:
+                    _ = driver.window_handles
+                except Exception:
+                    safe_print(f"\n[{i + 1}] 🚨 监控期间侦测到浏览器窗口被关闭，立即退出！")
+                    break
+                time.sleep(1)
+                current_length = 0
+                try:
+                    # 使用 reversed 遍历，并采用 get_attribute("innerText") 防止截断
+                    previews = driver.find_elements(By.ID, "preview")
+                    for p in reversed(previews):
+                        if p.is_displayed():
+                            actual_text = p.get_attribute("innerText") or p.get_attribute("textContent") or ""
+                            current_length = len(actual_text.strip())
+                            break
+                except Exception:
+                    pass
 
-        for _ in range(max_wait_loops):
-            if STOP_SCRIPT:
-                safe_print(f"[{i + 1}] 🛑 收到中止指令，立即停止网页监控！")
-                break
-            try:
-                _ = driver.window_handles
-            except Exception:
-                safe_print(f"\n[{i + 1}] 🚨 监控期间侦测到浏览器窗口被关闭，立即退出！")
-                break
-            time.sleep(1)
-            current_length = 0
-            try:
-                # 使用 reversed 遍历，并采用 get_attribute("innerText") 防止截断
-                previews = driver.find_elements(By.ID, "preview")
-                for p in reversed(previews):
-                    if p.is_displayed():
-                        actual_text = p.get_attribute("innerText") or p.get_attribute("textContent") or ""
-                        current_length = len(actual_text.strip())
-                        break
-            except Exception:
-                pass
+                if current_length > 0 and current_length == last_length:
+                    stable_count += 1
+                else:
+                    stable_count = 0
+                last_length = current_length
 
-            if current_length > 0 and current_length == last_length:
-                stable_count += 1
+                if stable_count >= required_stable_seconds:
+                    safe_print(
+                        f"[{i + 1}] ✅ 回答文本已连续 {required_stable_seconds} 秒无变化，判定生成彻底完成！最终字数: {current_length}")
+                    break
             else:
-                stable_count = 0
-            last_length = current_length
-
-            if stable_count >= required_stable_seconds:
-                safe_print(
-                    f"[{i + 1}] ✅ 回答文本已连续 {required_stable_seconds} 秒无变化，判定生成彻底完成！最终字数: {current_length}")
-                break
-        else:
-            if not STOP_SCRIPT:
-                safe_print(f"[{i + 1}] ⚠️ 警告：监控达到 300 秒上限，生成总时间超时！")
-                timeout_status = "yes (总时间超时)"
-    except Exception as wait_error:
-        safe_print(f"[{i + 1}] ⚠️ 智能监控发生异常，强制继续执行: {wait_error}")
-        time.sleep(2)
+                if not STOP_SCRIPT:
+                    safe_print(f"[{i + 1}] ⚠️ 警告：监控达到 300 秒上限，生成总时间超时！")
+                    timeout_status = "yes (总时间超时)"
+        except Exception as wait_error:
+            safe_print(f"[{i + 1}] ⚠️ 智能监控发生异常，强制继续执行: {wait_error}")
+            time.sleep(2)
 
         if STOP_SCRIPT:
             return
@@ -606,16 +620,89 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
         prep_time = "N/A"
         comp_time = "N/A"
         try:
-            time.sleep(1)
-            # 【核心对齐】获取 body 的 innerText
-            page_text = driver.find_element(By.TAG_NAME, "body").get_attribute("innerText") or ""
-            prep_match = re.search(r'(?:Time of preparation|準備時長:)[^\d]*([\d\.]+s?)', page_text, re.IGNORECASE)
-            if prep_match: prep_time = prep_match.group(1).replace(" ", "")
-            comp_match = re.search(r'(?:Time of completion|完成時長)[^\d]*([\d\.]+s?)', page_text, re.IGNORECASE)
-            if comp_match: comp_time = comp_match.group(1).replace(" ", "")
-            safe_print(f"[{i + 1}] ⏱️ 提取时间成功 -> 准备耗时: {prep_time}, 完成耗时: {comp_time}")
+            # 1. 强制等待 3 秒，等组件完全挂载到 React 树上
+            time.sleep(3)
+
+            # 2. 注入核弹级 JS：全方位透视 DOM 与 React 底层内存树
+            times_info = driver.execute_script("""
+                        try {
+                            var prep = 'N/A', comp = 'N/A';
+                            var debugLog = [];
+                            // 锁定我们要找的滚动组件标签
+                            var flows = document.querySelectorAll('number-flow-react, number-flow');
+                            debugLog.push('找到标签数: ' + flows.length);
+                            var vals = [];
+
+                            for(var i=0; i<flows.length; i++) {
+                                var el = flows[i];
+                                var val = null;
+
+                                // 第一层：尝试常规 DOM 属性
+                                if (el.value !== undefined) val = el.value;
+                                else if (el.getAttribute('value')) val = el.getAttribute('value');
+                                else if (el.getAttribute('aria-valuenow')) val = el.getAttribute('aria-valuenow');
+
+                                // 第二层：入侵 React 16-18+ 的 Fiber 内存树，向上回溯寻找 memoizedProps
+                                if (val == null) {
+                                    var fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                                    if (fiberKey) {
+                                        var curr = el[fiberKey];
+                                        // 向上回溯 5 层，寻找包含 value 变量的节点
+                                        for (var j=0; j<5; j++) {
+                                            if (curr && curr.memoizedProps && curr.memoizedProps.value !== undefined) {
+                                                val = curr.memoizedProps.value;
+                                                debugLog.push('通过Fiber提取成功');
+                                                break;
+                                            }
+                                            if (curr) curr = curr.return;
+                                        }
+                                    }
+                                }
+
+                                // 第三层：入侵 React 17+ 的 Props 内存
+                                if (val == null) {
+                                    var propsKey = Object.keys(el).find(k => k.startsWith('__reactProps$'));
+                                    if (propsKey && el[propsKey] && el[propsKey].value !== undefined) {
+                                        val = el[propsKey].value;
+                                        debugLog.push('通过Props提取成功');
+                                    }
+                                }
+
+                                if (val !== null) vals.push(val);
+                            }
+
+                            if (vals.length >= 1) prep = vals[0] + 's';
+                            if (vals.length >= 2) comp = vals[1] + 's';
+
+                            return { prep: prep, comp: comp, debug: debugLog.join(' | ') };
+                        } catch(err) {
+                            return { prep: 'N/A', comp: 'N/A', debug: 'JS报错: ' + err.message };
+                        }
+                    """)
+
+            if times_info:
+                prep_time = times_info.get("prep", "N/A")
+                comp_time = times_info.get("comp", "N/A")
+                debug_info = times_info.get("debug", "")
+
+                # 第四层极限保底：如果连 React 内存里都没有，强行用正则刮取底层 HTML 代码
+                if prep_time == "N/A":
+                    html = driver.execute_script("return document.body.innerHTML;")
+                    # 匹配类似 value="99.5" 的隐藏属性
+                    html_matches = re.findall(r'<number-flow[^>]*?(?:value|aria-valuenow)=["\']?([0-9.]+)["\']?', html,
+                                              re.IGNORECASE)
+                    if len(html_matches) >= 1:
+                        prep_time = html_matches[0] + "s"
+                        debug_info += " | 触发底层HTML正则兜底"
+                    if len(html_matches) >= 2:
+                        comp_time = html_matches[1] + "s"
+
+                safe_print(f"[{i + 1}] ⏱️ 提取时间 -> 准备耗时: {prep_time}, 完成耗时: {comp_time} (底层诊断: {debug_info})")
+            else:
+                safe_print(f"[{i + 1}] ⏱️ 提取失败：JS 脚本未返回任何数据。")
+
         except Exception as time_err:
-            safe_print(f"[{i + 1}] ⚠️ 提取时间信息时发生小错误，已跳过: {time_err}")
+            safe_print(f"[{i + 1}] ⚠️ 提取时间发生代码异常: {time_err}")
 
         if is_text_only:
             file_content = "【无原始文档，用户仅提供了纯文本提问，请仅根据问题本身评估回答是否准确且符合逻辑】"
@@ -656,7 +743,7 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
 
                 # 准备好要写入的一整行数据
                 row_data = [
-                    i + 1, question_text, tester_exp, display_filename, display_target_language,
+                    i + 1, question_text,display_filename, "No", tester_exp, display_target_language,
                     input_lang, output_lang, lang_status, short_answer, current_page_url,
                     evaluation_text, target_agent if target_agent else "未指定", ref_link, doc_contain,
                     prep_time, comp_time, timeout_status
@@ -696,15 +783,32 @@ def process_single_task(i, question_text, target_agent, filename, target_languag
                 try:
                     wb = openpyxl.load_workbook(excel_path)
                     ws = wb.active
+                    crash_reason = f"⚠️ 自动化执行崩溃: {str(e)[:150]}"
                     # 在对应的行号记录下崩溃信息
-                    ws.cell(row=i + 2, column=1, value=i + 1)  # label
-                    ws.cell(row=i + 2, column=2, value=question_text)  # Request
-                    ws.cell(row=i + 2, column=3, value="Failed")  # Tester Expectation
-                    ws.cell(row=i + 2, column=4, value=filename if filename else "")  # filename
-                    ws.cell(row=i + 2, column=5, value=target_language if target_language else "N/A")
-                    ws.cell(row=i + 2, column=11, value=f"⚠️ 自动化执行崩溃: {str(e)[:150]}")  # DeepSeek评价列填入报错信息
-                    ws.cell(row=i + 2, column=12, value=target_agent if target_agent else "未指定")
-                    ws.cell(row=i + 2, column=17, value="Crash (Error)")  # Timeout_States列
+                    row_data = [
+                        i + 1,  # 1. label
+                        question_text,  # 2. Request
+                        filename if filename else "",  # 3. filename
+                        crash_reason,  # 4. Crash
+                        "Failed",  # 5. Tester Expectation
+                        target_language if target_language else "N/A",  # 6. Selected Language
+                        "N/A",  # 7. Input Language
+                        "N/A",  # 8. Output Language
+                        "Failed",  # 9. Language Overall Status
+                        "【执行崩溃，未能生成回答】",  # 10. answer
+                        "N/A",  # 11. shared link
+                        crash_reason,  # 12. DeepSeek评价内容 (复用报错信息)
+                        target_agent if target_agent else "未指定",  # 13. Selected agent
+                        "N/A",  # 14. Reference Link
+                        "None",  # 15. Document Contain[1][2][3]
+                        "N/A",  # 16. Preparation Time
+                        "N/A",  # 17. Completion Time
+                        "Crash (Error)"  # 18. Timeout_States
+                    ]
+                    # 精准占位写入
+                    target_row = i + 2
+                    for col_index, value in enumerate(row_data, start=1):
+                        ws.cell(row=target_row, column=col_index, value=value)
                     wb.save(excel_path)
                     CONSECUTIVE_CLOSES = 0
                 except Exception as backup_err:
@@ -741,10 +845,6 @@ def run_automation():
     if not questions:
         print("未提取到任何问题，程序终止。")
         return
-    if len(questions) != len(selected_agents):
-        print(
-            f"[致命错误] 提取到的问题数量({len(questions)})与 Agent 数量({len(selected_agents)})不一致！请检查 Excel 格式。")
-        return
 
     # 获取 test 文件夹中支持的文件，并进行【按文件名排序】
     valid_extensions = ('.pdf', '.docx', '.csv', '.txt')
@@ -752,7 +852,7 @@ def run_automation():
     test_files.sort()
 
     if len(test_files) != len(questions):
-        print(f"[警告] 文件夹中的文件数量 ({len(test_files)}) 与 Excel 中的问题数量 ({len(questions)}) 不匹配！")
+        print(f" 文件夹中的文件数量 ({len(test_files)}) 与 Excel 中的问题数量 ({len(questions)}) 不匹配！")
 
     # ================= 初始化 Excel 结果文件 =================
     base_testcase_name = os.path.splitext(os.path.basename(INPUT_EXCEL_PATH))[0]
@@ -773,7 +873,7 @@ def run_automation():
         wb.properties.description = "Authored by Henry HONG. "
         ws = wb.active
         ws.title = "Evaluation Results"
-        ws.append(["label", "Request", "Tester Expectation", "filename", "Selected Language", "Input Language",
+        ws.append(["label", "Request", "filename", "Crash", "Tester Expectation", "Selected Language", "Input Language",
                    "Output Language", "Language Overall Status", "answer", "shared link", "DeepSeek评价内容",
                    "Selected agent", "Reference Link", "Document Contain[1][2][3]", "Preparation Time",
                    "Completion Time", "Timeout_States"])
@@ -797,17 +897,17 @@ def run_automation():
     # ===============================================================
 
     # 等所有线程都跑完后，才会执行下面的报告生成逻辑
-    if not STOP_SCRIPT:
-        print("📊 正在生成最终的 Summary 报告...")
-        dynamic_csv_name = f"Summary_{base_testcase_name}_{timestamp}.csv"
-        summary_dir = os.path.join(project_dir, "Summaries")
-        os.makedirs(summary_dir, exist_ok=True)
-        output_csv = os.path.join(summary_dir, dynamic_csv_name)
-        try:
-            generate_summary_csv(excel_path, output_csv)
-            print(f"✅ 汇总报告已生成: {output_csv}")
-        except Exception as e:
-            print(f"⚠️ 生成汇总报告时发生异常: {e}")
+
+    print("📊 正在生成最终的 Summary 报告...")
+    dynamic_csv_name = f"Summary_{base_testcase_name}_{timestamp}.csv"
+    summary_dir = os.path.join(project_dir, "Summaries")
+    os.makedirs(summary_dir, exist_ok=True)
+    output_csv = os.path.join(summary_dir, dynamic_csv_name)
+    try:
+        generate_summary_csv(excel_path, output_csv)
+        print(f"✅ 汇总报告已生成: {output_csv}")
+    except Exception as e:
+        print(f"⚠️ 生成汇总报告时发生异常: {e}")
 
     if STOP_SCRIPT:
         print("\n🛑 任务已被手动中断！")
