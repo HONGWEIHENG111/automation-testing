@@ -85,7 +85,6 @@ def evaluate_with_deepseek(question_text: str, file_content: str, answer_text: s
                 return json.loads(clean_result)
             else:
                 raise ValueError("未能找到 JSON 结构")
-            return json.loads(clean_result)
         except Exception as e:
             safe_eval_print(f"⚠️ 第 {attempt + 1} 次调用 DeepSeek 失败: {e}")
             if attempt < max_retries - 1:
