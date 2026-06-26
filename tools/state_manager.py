@@ -1,9 +1,9 @@
-# state_manager.py
 import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.keys import Keys
+UI_WAIT_TIME = 15
+
 def handle_post_send(driver, current_state):
     """
     阶段 2：负责处理点击“发送”按钮之后的特殊状态逻辑
@@ -31,7 +31,7 @@ def execute_state(driver, current_state, target_agent=""):
     # state1 就是选择 Agent Finder Mode并且关闭Auto mode
     if current_state == "1":
         print("   🔍 正在选择 Agent Finder Mode...")
-        mode_radio = WebDriverWait(driver, 5).until(
+        mode_radio = WebDriverWait(driver, UI_WAIT_TIME).until(
             EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'mode-header') and (.//span[text()='Agent Finder Mode'] or .//span[text()='代理尋找模式'])]//div[contains(@class, 'mode-radio')]"))
         )
         driver.execute_script("arguments[0].click();", mode_radio)
@@ -48,7 +48,7 @@ def execute_state(driver, current_state, target_agent=""):
         print("🟢 当前运行：状态 2 (Agent Finder Mode + Auto开启 + 自动生成)")
         try:
             print("   🔍 正在寻找弹窗内的 mode-radio...")
-            mode_radio = WebDriverWait(driver, 5).until(
+            mode_radio = WebDriverWait(driver, UI_WAIT_TIME).until(
                 EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'mode-header') and (.//span[text()='Agent Finder Mode'] or .//span[text()='代理尋找模式'])]//div[contains(@class, 'mode-radio')]"))
             )
             driver.execute_script("arguments[0].click();", mode_radio)
@@ -65,28 +65,29 @@ def execute_state(driver, current_state, target_agent=""):
             time.sleep(0.5)
 
         except Exception as set_err:
-            print(f"   ⚠️ [警告] 设置 Agent Finder 面板时超时或失败，正在跳过设置继续执行: {set_err}")
+            print(f"   ⚠️ [致命错误] 设置 Agent Finder 面板时超时或失败，正在跳过设置继续执行: {set_err}")
+            raise set_err
     # state3 就是选择 General Agent Mode
     elif current_state == "3":
         print("🟢 当前运行：状态 3 (General Agent Mode + 自动生成)")
         try:
             print("   🔍 步骤 B: 正在寻找并选择 General Agent Mode...")
-            general_mode_radio = WebDriverWait(driver, 5).until(
+            general_mode_radio = WebDriverWait(driver, UI_WAIT_TIME).until(
                 EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'mode-header') and (.//span[contains(text(), 'General Agent Mode')] or .//span[contains(text(), '通用AI代理模式')])]//div[contains(@class, 'mode-radio')]"))
             )
             driver.execute_script("arguments[0].click();", general_mode_radio)
             time.sleep(0.5)
 
         except Exception as set_err:
-            print(f"   ⚠️ [警告] 设置 General Agent 面板时超时或失败，正在跳过设置继续执行: {set_err}")
-
+            print(f"   ⚠️ [致命错误] 设置 General Agent 面板时超时或失败，正在跳过设置继续执行: {set_err}")
+            raise set_err
     # state4 就是选择  Agent Master Mode并且开启 Auto Mode
     elif current_state == "4":
         print(f"🟢 当前运行：状态 {current_state} (Agent Master Mode 通用步骤)")
         try:
             # 1. 寻找并选择 Agent Master Mode 的单选框
             print("   🔍 正在选择 Agent Master Mode...")
-            master_mode_radio = WebDriverWait(driver, 5).until(
+            master_mode_radio = WebDriverWait(driver, UI_WAIT_TIME).until(
                 EC.presence_of_element_located((By.XPATH,
                                                 "//div[contains(@class, 'mode-header') and (.//span[text()='Agent Master Mode'] or .//span[text()='代理自選模式'])]//div[contains(@class, 'mode-radio')]"))
             )
@@ -114,7 +115,7 @@ def execute_state(driver, current_state, target_agent=""):
 
             # 3. 点击进入 Agent Master 选项卡 (tab)
             print("   🔍 正在点击 Agent Master 侧边栏菜单...")
-            agent_master_tab = WebDriverWait(driver, 5).until(
+            agent_master_tab = WebDriverWait(driver, UI_WAIT_TIME).until(
                 EC.presence_of_element_located((By.XPATH, "//li[@data-tab='tab-agent-master']"))
             )
             driver.execute_script("arguments[0].click();", agent_master_tab)
@@ -122,7 +123,7 @@ def execute_state(driver, current_state, target_agent=""):
 
             print("   🧹 正在点击 Clear All 清空历史选择...")
             try:
-                clear_all_btn = WebDriverWait(driver, 5).until(
+                clear_all_btn = WebDriverWait(driver, UI_WAIT_TIME).until(
                     EC.presence_of_element_located((By.ID, "agent-master-clear-all"))
                 )
                 driver.execute_script("arguments[0].click();", clear_all_btn)
@@ -132,7 +133,7 @@ def execute_state(driver, current_state, target_agent=""):
                 print(f"   ⚠️ 未找到 Clear All 按钮或清空失败（可能当前列表本就是空的）: {clear_err}")
 
             print("   🔍 正在点击 Agent 搜索框...")
-            search_input = WebDriverWait(driver, 5).until(
+            search_input = WebDriverWait(driver, UI_WAIT_TIME).until(
                 EC.presence_of_element_located((By.ID, "agent-master-search"))
             )
             driver.execute_script("arguments[0].click();", search_input)
@@ -142,7 +143,7 @@ def execute_state(driver, current_state, target_agent=""):
 
             if target_agent:
 
-                search_input = WebDriverWait(driver, 5).until(
+                search_input = WebDriverWait(driver, UI_WAIT_TIME).until(
                     EC.presence_of_element_located((By.ID, "agent-master-search"))
                 )
                 # 2. 用 JS 一步到位：清空 -> 赋值 -> 触发前端双向绑定事件
@@ -161,7 +162,7 @@ def execute_state(driver, current_state, target_agent=""):
                 print(f"   ➕ 正在精准匹配并添加 Agent: {target_agent}")
                 try:
                     # 先等待带有加号 class 的按钮出现在网页中
-                    WebDriverWait(driver, 5).until(
+                    WebDriverWait(driver, UI_WAIT_TIME).until(
                         EC.presence_of_element_located((By.CLASS_NAME, "am-agent-add-btn"))
                     )
                     # 把当前网页里所有的加号按钮都抓出来
