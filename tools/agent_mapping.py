@@ -190,7 +190,6 @@ AGENT_NAME_MAPPING_TC = {
     "Putonghua Primary Teaching Plan": ["Putonghua Primary Teaching Plan"],
     "Moral and Civic Education Primary Teaching Plan": ["Moral and Civic Education Primary Teaching Plan"],
     "Technology Education Primary Teaching Plan": ["Technology Education Primary Teaching Plan"],
-
     "Chinese Primary Exam": ["Chinese Primary Exam"],
     "English Primary Exam": ["English Primary Exam"],
     "Mathematics Primary Exam": ["Mathematics Primary Exam"],
@@ -291,6 +290,16 @@ AGENT_NAME_MAPPING_TC = {
     "Speaker Ideation": ["Speaker Ideation"],
     "Job Application Letter": ["Job Application Letter"],
     "English writing improver": ["English writing improver"],
+    "Self-Learning Q&A": ["自學問答題"],
+    "Gathering Idea with family, friends, etc": ["聚集理念"],
+    "Travel Idea": ["旅行點子"],
+    "Skill Idea": ["技能理念"],
+    "Gift Idea": ["禮品創意"],
+    "Activity Idea": ["活動理念"],
+    "Image link Searcher": ["Image link Searcher"],
+    "Web Link Searcher": ["Web Link Searcher"],
+    "Summarizer": ["Summarizer"],
+    "Daily-Highlight": ["Daily-Highlight"],
 }
 
 
