@@ -1,6 +1,6 @@
 import json
 from openai import OpenAI
-from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL
+from utils.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL
 import time
 import random
 deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
@@ -97,7 +97,7 @@ def evaluate_with_deepseek(question_text: str, file_content: str, answer_text: s
             else:
                 # 如果解析失败，返回带有错误信息的默认字典结构
                 return {
-                "tester_expectation": "Parse Error",
+                "tester_expectation": "Parse Error(Failed)",
                 "input_language": "Parse Error",
                 "output_language": "Parse Error",
                 "language_status": "Failed",
