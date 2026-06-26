@@ -1,12 +1,11 @@
 import pandas as pd
-import base64
 import os
 from openai import OpenAI
 import re
 import csv
 import io
 from datetime import datetime
-from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, USERNAME, PASSWORD, HOME_URL
+from utils.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, USERNAME, PASSWORD, HOME_URL
 
 def generate_summary_csv(excel_path, output_csv_path):
     if not os.path.exists(excel_path):
@@ -23,9 +22,13 @@ def generate_summary_csv(excel_path, output_csv_path):
     # 1. Overall Test Result Summary (只要 Language Failed 或 Tester 覺得 Failed/Poor 就判定為 Failed)
     timeout_mask = df.get('Timeout_States', pd.Series(['No'] * len(df))).astype(str).str.contains('yes', case=False,
                                                                                                   na=False)
-    valid_total_tests = total_tests - timeout_mask.sum()  # 非超时任务的有效总数
+    crash_mask = (df.get('Crash', pd.Series(['No'] * len(df))).astype(str) != 'No') & \
+                 (df.get('Crash', pd.Series(['No'] * len(df))).notna())
+    crash_count = crash_mask.sum()
+    valid_total_tests = total_tests - timeout_mask.sum() - crash_count  # 非超时任务的有效总数
+    if valid_total_tests < 0: valid_total_tests = 0
     failed_mask = ((df['Language Overall Status'].astype(str).str.contains('Failed', na=False, case=False)) | \
-                   (df['Tester Expectation'].astype(str).isin(['Poor', 'Failed']))) & (~timeout_mask)
+                   (df['Tester Expectation'].astype(str).isin(['Poor', 'Failed', 'Parse Error (Failed)']))) & (~timeout_mask) & (~crash_mask)
     failed_count = failed_mask.sum()
     pass_count = valid_total_tests - failed_count
 
@@ -33,6 +36,8 @@ def generate_summary_csv(excel_path, output_csv_path):
     eval_data = []
     for idx, row in df.iterrows():
         if timeout_mask[idx]:  # 如果是超时行，直接跳过
+            continue
+        if crash_mask[idx]:  # 如果是崩溃行，也直接跳过，不参与 AI 质量定性聚类
             continue
         eval_text = str(row.get('DeepSeek评价内容', '')).strip()
         ans_text = str(row.get('answer', '')).strip()
@@ -46,7 +51,7 @@ def generate_summary_csv(excel_path, output_csv_path):
 
     # 3. Language Testing Summary
     lang_fail_count = (df['Language Overall Status'].astype(str).str.contains('Failed', na=False, case=False) & (
-        ~timeout_mask)).sum()
+        ~timeout_mask) & (~crash_mask)).sum()
     lang_pass_count = valid_total_tests - lang_fail_count
 
     # 5. Performance Summary
@@ -76,10 +81,11 @@ def generate_summary_csv(excel_path, output_csv_path):
 
     # 提取語言錯誤的回答樣本 (新增傳入 Test ID)
     lang_failed_mask = df['Language Overall Status'].astype(str).str.contains('Failed', case=False, na=False)
-    timeout_mask = ~df.get('Timeout_States', pd.Series(['No'] * len(df))).astype(str).str.contains('yes', case=False,
-                                                                                                   na=False)
 
-    lang_failed_samples = df[lang_failed_mask & timeout_mask][
+    no_timeout_mask = ~df.get('Timeout_States', pd.Series(['No'] * len(df))).astype(str).str.contains('yes', case=False,
+                                                                                                      na=False)
+
+    lang_failed_samples = df[lang_failed_mask & no_timeout_mask][
         ['Input Language', 'Output Language', 'answer']].dropna().head(50)
     lang_failed_text = "\n".join(
         [
@@ -113,7 +119,7 @@ def generate_summary_csv(excel_path, output_csv_path):
             Failure Reason Breakdown,,,
             "One test may contain multiple issues, so percentages below are based on total test cases, not mutually exclusive.",,,
             Failure / Issue Type,Matching Test IDs,Example
-            (請仔細閱讀上方提供的【所有測試的 DeepSeek 評價內容】，動態聚類出主要的錯誤類型,10个左右，最少8个，將對應的 Test ID 填入 Matching Test IDs 欄位，並從樣本中提取歸納一個 Example),,,
+            (請仔細閱讀上方提供的【所有測試的 DeepSeek 評價內容】，動態聚類出主要的錯誤類型,10个左右，最少8个，將對應的 Test ID 填入 Matching Test IDs 欄位，並從樣本中提取歸納一個 Example),,,注意：如果您的 Failure / Issue Type 包含逗號，請務必使用雙引號將其完整包裹，例如：\"Formatting Issues (e.g., Tables)\")"
             ---BLOCK1_END---
 
             ---BLOCK2_START---
@@ -164,6 +170,8 @@ def generate_summary_csv(excel_path, output_csv_path):
 
             for row in reader:
                 if not row or all(not str(cell).strip() for cell in row):
+                    is_id_mode = False
+                    writer.writerow(row)
                     continue
                 # 替換表頭
                 if "Matching Test IDs" in row:
@@ -238,12 +246,14 @@ def generate_summary_csv(excel_path, output_csv_path):
         ",,,"  # 空行分隔线
     ]
     # 1. 總結部分
+    invalid_count = timeout_mask.sum() + crash_count
     summary_lines = [
         "Overall Test Result Summary,,,",
         "Item,Count,Percentage,",
         f"Total Tests,{total_tests},100%,",
         f"Pass,{pass_count},{pass_count / total_tests:.2%} ",
         f"Failed,{failed_count},{failed_count / total_tests:.2%} ",
+        f"Invalid (Timeout/Crash),{invalid_count},{invalid_count / total_tests:.2%} ",
         ",,,"
     ]
     valid_div = valid_total_tests if valid_total_tests > 0 else 1
@@ -282,7 +292,27 @@ def generate_summary_csv(excel_path, output_csv_path):
         f"Average Loading Time,~{avg_time:.1f}s,,",
         ",,,"
     ]
-    # ================= Timeout 測試部分 =================
+    # ==================== 💡 Crash 模块数据提取 ====================
+    crash_ids = df[crash_mask].index + 1
+    crash_ids_str = ", ".join(map(str, crash_ids.tolist())) if crash_count > 0 else "None"
+
+    crash_lines = [
+        "Crash Summary,,,",
+        "Status,Count,Percentage,Matching Test IDs / Detailed Reasons",
+        f"No Crash,{total_tests - crash_count},{(total_tests - crash_count) / total_tests:.2%} ,\"None\"",
+        f"Has Crash,{crash_count},{crash_count / total_tests:.2%} ,\"{crash_ids_str}\""
+    ]
+
+    # 动态遍历每一个崩溃的用例，把它的 ID 和具体的报错原因以子行的形式打印出来
+    if crash_count > 0:
+        for idx, row in df[crash_mask].iterrows():
+            specific_reason = str(row.get('Crash', 'Unknown Automation Error'))
+            # 替换英文逗号防止 CSV 格式错乱
+            specific_reason = specific_reason.replace(',', ';')
+            crash_lines.append(f" -> Test ID {idx + 1},1,N/A,\"{specific_reason}\"")
+
+    crash_lines.append(",,,")  # 空行分隔
+
     # ================= Timeout 測試部分 =================
     if 'Timeout_States' in df.columns:
         # 1. 宏观超时判定 (只要有 yes 就是超时)
@@ -337,6 +367,7 @@ def generate_summary_csv(excel_path, output_csv_path):
             common_lang_csv + "\n,,,\n" +
             "\n".join(ref_lines) + "\n" +  # 插入 Reference 模塊
             "\n".join(perf_lines) + "\n" +  # 插入 性能 模塊
+            "\n".join(crash_lines) + "\n" +
             "\n".join(timeout_lines) + "\n" +  # <--- 新增：插入 Timeout 模塊
             observations_csv
     )
@@ -349,7 +380,20 @@ def generate_summary_csv(excel_path, output_csv_path):
 
 # 允許腳本獨立運行測試
 if __name__ == "__main__":
+    import os
+    from utils.config import PROJECT_ROOT, SUMMARY_ROOT_DIR
     # 假設這兩個檔案與腳本在同一目錄下
-    test_in = "evaluation_results.xlsx"
-    test_out = "Summary_Test.csv"
-    generate_summary_csv(test_in, test_out)
+    target_excel_path = "Evaluation_Results/evaluation_results_YoyoTopics_20260506_120000.xlsx"
+    if not os.path.exists(target_excel_path):
+        print(f"❌ 找不到指定的 Excel 文件，请检查路径: {target_excel_path}")
+    else:
+        print(f"🔄 启动急救模式！正在为中断的 Excel 生成汇总报告...")
+    base_name = os.path.splitext(os.path.basename(target_excel_path))[0]
+
+    # 2. 统一放到总的 Summaries 目录下 (适配 main 和 multipage)
+    # 如果你想细分，也可以自己改成 config 里的 SUMMARY_ENV_1_DIR 等
+    os.makedirs(SUMMARY_ROOT_DIR, exist_ok=True)
+    target_out_csv = os.path.join(SUMMARY_ROOT_DIR, f"Recovered_{base_name}.csv")
+
+    # 3. 呼叫大模型重新生成报告
+    generate_summary_csv(target_excel_path, target_out_csv)
