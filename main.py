@@ -1,11 +1,13 @@
 import os
 import time
+import queue
+import re
 from datetime import datetime
 import threading
 import openpyxl
 import keyboard
 from webdriver_manager.chrome import ChromeDriverManager
-
+from utils.logger import setup_global_logger
 from utils.config import USERNAME, PASSWORD, HOME_URL, INPUT_EXCEL_PATH
 from utils.common import (
     show_authorship, close_popups, get_test_data_from_excel, init_browser, perform_login
@@ -29,7 +31,57 @@ def listen_for_hotkey():
     except Exception as e:
         print(f"⚠️ 热键监听启动失败 (可能缺少管理员权限)，将禁用 Ctrl+Q 功能: {e}")
 
+def excel_writer_worker(excel_path, q, log_func=print):
+    """专职 Excel 写入后台线程（带非法字符过滤）"""
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(excel_path)
+        ws = wb.active
+    except Exception as e:
+        log_func(f"❌ [写线程致命错误] 无法加载 Excel: {e}")
+        return
+
+    while True:
+        item = q.get()
+        if item == "STOP":
+            try: wb.save(excel_path)
+            except: pass
+            break
+
+        task, result = item
+        try:
+            row_data = [
+                task.index + 1, task.question_text, task.filename if task.filename else "",
+                result.crash_reason, result.tester_expectation, task.target_language if task.target_language else "N/A",
+                result.input_language, result.output_language, result.language_status,
+                result.answer_text, result.shared_link, result.evaluation_text,
+                result.actual_agent_used, result.reference_link, result.document_contain,
+                result.prep_time, result.comp_time, result.timeout_status
+            ]
+            target_row = task.index + 2
+            for col_index, value in enumerate(row_data, start=1):
+                # 🛡️ 核心防御：过滤 Excel 不支持的非法控制字符
+                if isinstance(value, str):
+                    value = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', value)
+                ws.cell(row=target_row, column=col_index, value=value)
+
+            save_success = False
+            for retry in range(3):
+                try:
+                    wb.save(excel_path)
+                    save_success = True
+                    break
+                except PermissionError:
+                    time.sleep(3)
+            if not save_success:
+                log_func(f"❌ [致命错误] 多次尝试保存失败，第 {task.index + 1} 行结果丢失！")
+        except Exception as e:
+            log_func(f"❌ [写线程异常] 写入行 {task.index + 1} 失败: {e}")
+        finally:
+            q.task_done()
+
 def run_automation():
+    setup_global_logger()
     print("📥 正在初始化並緩存瀏覽器驅動...")
     cached_driver_path = ChromeDriverManager().install()
     threading.Thread(target=listen_for_hotkey, daemon=True).start()
@@ -83,7 +135,9 @@ def run_automation():
         wb.save(excel_path)
         print(f"📊 已创建评价结果 Excel 文件: {excel_path}")
 
-    excel_write_lock = threading.Lock()  # 单线程也用 Lock，保持 pipeline 接口一致
+    result_queue = queue.Queue()
+    writer_thread = threading.Thread(target=excel_writer_worker, args=(excel_path, result_queue, print), daemon=True)
+    writer_thread.start()
 
     # ================= 启动专属浏览器 =================
     try:
@@ -128,8 +182,7 @@ def run_automation():
                 task=task,
                 driver=driver,
                 test_dir=test_dir,
-                excel_path=excel_path,
-                excel_write_lock=excel_write_lock,
+                result_queue=result_queue,
                 stop_event=STOP_EVENT,
                 log_func=print
             )
@@ -162,6 +215,10 @@ def run_automation():
         print(f"\n❌ 主脚本发生未预期的致命错误: {e}")
     finally:
     # ================= 生成报告与清理 =================
+        print("💾 正在等待残余数据写入 Excel...")
+        if 'result_queue' in locals():
+            result_queue.put("STOP")
+            writer_thread.join(timeout=10)
         print("📊 正在生成最终的 Summary 报告...")
         output_csv = os.path.join(project_dir, "Summaries", f"Summary_{base_testcase_name}_{timestamp}.csv")
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
