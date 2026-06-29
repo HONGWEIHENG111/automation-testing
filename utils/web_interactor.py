@@ -7,10 +7,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.remote.webdriver import WebDriver
 
-# 导入你原有的工具函数
+# 导入原有的工具函数
 from tools.state_manager import execute_state, handle_post_send
 from utils.common import get_react_time_extraction_js, close_popups
-
+from utils.signals import STOP_EVENT
 
 class WebInteractor:
     """
@@ -40,7 +40,7 @@ class WebInteractor:
             tc_option = WebDriverWait(self.driver, 3).until(EC.presence_of_element_located(
                 (By.XPATH, "//a[contains(@class, 'language-option') and text()='繁中']")))
             self.driver.execute_script("arguments[0].click();", tc_option)
-            time.sleep(1.5)
+            time.sleep(1)
         else:
             self.log_func("🌐 [语言保持]: 目标语言为英文或空白，无需切换，直接保持默认英文状态。")
             """
@@ -112,7 +112,8 @@ class WebInteractor:
         gear_btn = WebDriverWait(self.driver, 5).until(
             EC.presence_of_element_located((By.XPATH, "//i[contains(@class, 'bi-gear-fill')]")))
         self.driver.execute_script("arguments[0].click();", gear_btn)
-        time.sleep(0.5)
+        WebDriverWait(self.driver, 5).until(
+            EC.visibility_of_element_located((By.ID, "global-settings-apply-btn")))
 
         final_agent_used = target_agent_raw
         if search_candidates:
@@ -140,7 +141,8 @@ class WebInteractor:
         apply_btn = WebDriverWait(self.driver, 10).until(
             EC.presence_of_element_located((By.ID, "global-settings-apply-btn")))
         self.driver.execute_script("arguments[0].click();", apply_btn)
-        time.sleep(1)
+        WebDriverWait(self.driver, 5).until(
+            EC.invisibility_of_element_located((By.ID, "global-settings-apply-btn")))
 
         self.log_func("🚀 [通用步骤]: 正在点击发送/生成按钮...")
         submit_btn = WebDriverWait(self.driver, 10).until(
@@ -241,11 +243,12 @@ class WebInteractor:
 
         return answer_text, current_page_url
 
-    def extract_react_times(self) -> Tuple[str, str]:
+    def extract_react_times(self, stop_event: threading.Event) -> Tuple[str, str]:
         """注入核弹级 JS 提取 React 渲染时间"""
         prep_time, comp_time = "N/A", "N/A"
         try:
-            time.sleep(3)
+            if stop_event.wait(timeout=3):
+                return "N/A", "N/A"
             times_info = self.driver.execute_script(get_react_time_extraction_js())
             if times_info:
                 prep_time = times_info.get("prep", "N/A")
