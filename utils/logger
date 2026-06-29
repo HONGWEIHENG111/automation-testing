@@ -1,0 +1,47 @@
+import logging
+import sys
+import os
+import builtins
+from datetime import datetime
+from utils.config import PROJECT_ROOT
+
+def setup_global_logger():
+    """
+    初始化标准 Logging 日志。在主程序最开头调用一次即可。
+    """
+    log_dir = os.path.join(PROJECT_ROOT, "Logs")
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(log_dir, f"Terminal_Log_{timestamp}.txt")
+
+    # 获取根日志器
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # 如果已经有 handler，清空它（防止重复打印）
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    # 设置极其干净的输出格式
+    formatter = logging.Formatter('%(message)s')
+
+    # 文件 Handler (强制 UTF-8 解决乱码)
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+
+    # 控制台 Handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    logging.info("==================================================")
+    logging.info(f"📝 标准 Logging 日志已开启，同步记录至: {log_path}")
+    logging.info("==================================================\n")
+
+    def custom_print(*args, **kwargs):
+        msg = " ".join(str(arg) for arg in args)
+        logging.info(msg)
+
+    builtins.print = custom_print
