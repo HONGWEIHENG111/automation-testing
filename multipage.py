@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from datetime import datetime
 import threading
@@ -7,7 +8,7 @@ import openpyxl
 import keyboard
 from concurrent.futures import ThreadPoolExecutor
 from webdriver_manager.chrome import ChromeDriverManager
-
+from utils.logger import setup_global_logger
 from utils.config import USERNAME, PASSWORD, HOME_URL, INPUT_EXCEL_PATH, MAX_WORKERS
 from utils.common import (
     show_authorship,
@@ -41,7 +42,56 @@ def listen_for_hotkey():
     except Exception as e:
         print(f"⚠️ 热键监听启动失败 (可能缺少管理员权限)，将禁用 Ctrl+Q 功能: {e}")
 
-def worker_thread(task_index, task_input: TaskInput, test_dir, excel_path, excel_write_lock, browser_pool, cached_driver_path):
+def excel_writer_worker(excel_path, q):
+    """专职 Excel 写入后台线程"""
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(excel_path)
+        ws = wb.active
+    except Exception as e:
+        safe_print(f"❌ [写线程致命错误] 无法加载 Excel: {e}")
+        return
+
+    while True:
+        item = q.get()
+        if item == "STOP":
+            try: wb.save(excel_path)
+            except: pass
+            break
+
+        task, result = item
+        try:
+            row_data = [
+                task.index + 1, task.question_text, task.filename if task.filename else "",
+                result.crash_reason, result.tester_expectation, task.target_language if task.target_language else "N/A",
+                result.input_language, result.output_language, result.language_status,
+                result.answer_text, result.shared_link, result.evaluation_text,
+                result.actual_agent_used, result.reference_link, result.document_contain,
+                result.prep_time, result.comp_time, result.timeout_status
+            ]
+            target_row = task.index + 2
+            for col_index, value in enumerate(row_data, start=1):
+                if isinstance(value, str):
+                    # 过滤掉 Excel 不支持的底层控制字符
+                    value = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', value)
+                ws.cell(row=target_row, column=col_index, value=value)
+
+            save_success = False
+            for retry in range(3):
+                try:
+                    wb.save(excel_path)
+                    save_success = True
+                    break
+                except PermissionError:
+                    time.sleep(3)
+            if not save_success:
+                safe_print(f"❌ [致命错误] 多次尝试保存失败，第 {task.index + 1} 行结果丢失！")
+        except Exception as e:
+            safe_print(f"❌ [写线程异常] 写入行 {task.index + 1} 失败: {e}")
+        finally:
+            q.task_done()
+
+def worker_thread(task_index, task_input: TaskInput, test_dir, result_queue, browser_pool, cached_driver_path):
     """
     独立线程工作者：只负责排队借用浏览器、执行流水线、然后归还浏览器。
     """
@@ -63,77 +113,80 @@ def worker_thread(task_index, task_input: TaskInput, test_dir, excel_path, excel
 
     # 2. 清理浏览器残余状态 (暴力兜底弹窗)
     try:
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        WebDriverWait(driver, 0.5).until(EC.alert_is_present())
-        driver.switch_to.alert.accept()
-    except Exception:
-        pass
+        try:
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            WebDriverWait(driver, 0.5).until(EC.alert_is_present())
+            driver.switch_to.alert.accept()
+        except Exception:
+            pass
 
-    try:
-        driver.get(HOME_URL)
-        time.sleep(1.5)
-    except Exception as e:
-        log_func(f"⚠️ 浏览器重置失败，可能已损坏: {e}")
+        try:
+            driver.get(HOME_URL)
+            if STOP_EVENT.wait(timeout=1.5):return
+        except Exception as e:
+            log_func(f"⚠️ 浏览器重置失败，可能已损坏: {e}")
 
     # ==============================================================
     # 3. 核心魔法：一行代码完成所有业务逻辑！
-    status = process_single_task(
-        task=task_input,
-        driver=driver,
-        test_dir=test_dir,
-        excel_path=excel_path,
-        excel_write_lock=excel_write_lock,
-        stop_event=STOP_EVENT,
-        log_func=log_func
-    )
+        status = process_single_task(
+            task=task_input,
+            driver=driver,
+            test_dir=test_dir,
+            result_queue=result_queue,
+            stop_event=STOP_EVENT,
+            log_func=log_func
+        )
     # ==============================================================
 
     # 4. 全局阻断机制与现场保留
-    global CONSECUTIVE_CLOSES
+        global CONSECUTIVE_CLOSES
 
-    if status == "BROWSER_CLOSED":
-        with CLOSES_LOCK:
-            CONSECUTIVE_CLOSES += 1
-            if CONSECUTIVE_CLOSES >= MAX_WORKERS and not STOP_EVENT.is_set():
-                safe_print("\n🛑 [全局拦截] 侦测到一口气关闭了所有窗口，判定为终止指令，脚本结束！")
-                STOP_EVENT.set()
+        if status == "BROWSER_CLOSED":
+            with CLOSES_LOCK:
+                CONSECUTIVE_CLOSES += 1
+                if CONSECUTIVE_CLOSES >= MAX_WORKERS and not STOP_EVENT.is_set():
+                    safe_print("\n🛑 [全局拦截] 侦测到一口气关闭了所有窗口，判定为终止指令，脚本结束！")
+                    STOP_EVENT.set()
 
-    elif status == "SUCCESS":
-        with CLOSES_LOCK:
-            CONSECUTIVE_CLOSES = 0  # 只要有成功跑完的，就重置计数器
+        elif status == "SUCCESS":
+            with CLOSES_LOCK:
+                CONSECUTIVE_CLOSES = 0  # 只要有成功跑完的，就重置计数器
 
-    elif status == "ERROR" and not STOP_EVENT.is_set():
-        with CLOSES_LOCK:
-            CONSECUTIVE_CLOSES = 0  # 普通报错也重置，防止误判
-        log_func("⏸️ 任务报错，保留浏览器现场 20 秒供排查...")
-        STOP_EVENT.wait(timeout=20)
-
+        elif status == "ERROR" and not STOP_EVENT.is_set():
+            with CLOSES_LOCK:
+                CONSECUTIVE_CLOSES = 0  # 普通报错也重置，防止误判
+            log_func("⏸️ 任务报错，保留浏览器现场 20 秒供排查...")
+            if STOP_EVENT.wait(timeout=20): return
+    except Exception as worker_err:
+        log_func(f"❌ [严重警报] 线程内部发生未捕获的异常，被成功拦截: {worker_err}")
+    finally:
     # 5. 归还或重建损毁的浏览器
-    if driver:
-        try:
-            _ = driver.title  # 试探性获取 title，报错说明被强关或崩溃
-            browser_pool.put(driver)
-        except Exception:
-            if not STOP_EVENT.is_set():
-                log_func("🔄 检测到浏览器已损毁，正在为您创建替补浏览器并放入池中...")
-                try:
-                    driver.quit()
-                except:
-                    pass
-                try:
-                    new_driver = init_browser(log_func=lambda msg: None, chrome_driver_path=cached_driver_path)
-                    new_driver.get(HOME_URL)
-                    time.sleep(1)
-                    perform_login(new_driver, USERNAME, PASSWORD, log_func=lambda msg: None)
-                    browser_pool.put(new_driver)
-                except Exception as rebuild_err:
-                    log_func(f"❌ 创建替补浏览器彻底失败: {rebuild_err}")
-                    log_func("🚨 触发防死锁机制，全局终止自动化任务！")
-                    STOP_EVENT.set()  # 👈 新增这一行，发出全局刹车信号
+        if driver:
+            try:
+                _ = driver.title  # 试探性获取 title，报错说明被强关或崩溃
+                browser_pool.put(driver)
+            except Exception:
+                if not STOP_EVENT.is_set():
+                    log_func("🔄 检测到浏览器已损毁，正在为您创建替补浏览器并放入池中...")
+                    try:
+                        if driver: driver.quit()
+                    except Exception as quit_err:
+                        log_func(f"🧹 浏览器销毁时出现预期内的警告 (已忽略): {quit_err}")
+                    try:
+                        new_driver = init_browser(log_func=lambda msg: None, chrome_driver_path=cached_driver_path)
+                        new_driver.get(HOME_URL)
+                        time.sleep(1)
+                        perform_login(new_driver, USERNAME, PASSWORD, log_func=lambda msg: None)
+                        browser_pool.put(new_driver)
+                    except Exception as rebuild_err:
+                        log_func(f"❌ 创建替补浏览器彻底失败: {rebuild_err}")
+                        log_func("🚨 触发防死锁机制，全局终止自动化任务！")
+                        STOP_EVENT.set()  # 👈 新增这一行，发出全局刹车信号
 
 
 def run_automation():
+    setup_global_logger()
     print("📥 正在初始化並緩存瀏覽器驅動...")
     cached_driver_path = ChromeDriverManager().install()
     threading.Thread(target=listen_for_hotkey, daemon=True).start()
@@ -152,7 +205,8 @@ def run_automation():
     # ================= 文件数量校验 =================
     valid_extensions = ('.pdf', '.docx', '.csv', '.txt')
     test_files = [f for f in os.listdir(test_dir) if f.lower().endswith(valid_extensions)]
-    if len(test_files) != len(questions):
+    expected_file_count = len([f for f in target_filenames if str(f).strip()])
+    if len(test_files) != expected_file_count:
         print(f"⚠️ 文件夹中的文件数量 ({len(test_files)}) 与 Excel 中的问题数量 ({len(questions)}) 不匹配！")
     # ================= 核心修改：打包 TaskInput =================
     task_inputs = []
@@ -187,7 +241,9 @@ def run_automation():
         print(f"📊 已创建评价结果 Excel 文件: {excel_path}")
 
     # ================= 预热浏览器池 (同原版) =================
-    excel_write_lock = threading.Lock()
+    result_queue = queue.Queue()
+    writer_thread = threading.Thread(target=excel_writer_worker, args=(excel_path, result_queue), daemon=True)
+    writer_thread.start()
     print(f"\n♨️ 正在预热浏览器池，将提前启动并登录 {MAX_WORKERS} 个浏览器，请稍候...")
     browser_pool = queue.Queue()
 
@@ -226,7 +282,7 @@ def run_automation():
                 if STOP_EVENT.is_set(): break
                 executor.submit(
                     worker_thread,
-                    task.index, task, test_dir, excel_path, excel_write_lock, browser_pool, cached_driver_path
+              task.index, task, test_dir, result_queue, browser_pool, cached_driver_path
                 )
     except KeyboardInterrupt:
         print("\n🛑 侦测到系统强行中断信号 (Ctrl+C)！正在紧急通知所有并行浏览器停止工作...")
@@ -235,6 +291,9 @@ def run_automation():
         print(f"\n❌ 主脚本发生致命崩溃: {e}")
     finally:
     # ================= 生成报告与清理  =================
+        print("💾 正在等待残余数据写入 Excel...")
+        result_queue.put("STOP")
+        writer_thread.join(timeout=10)
         print("📊 正在生成最终的 Summary 报告...")
         output_csv = os.path.join(project_dir, "Summaries", f"Summary_{base_testcase_name}_{timestamp}.csv")
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
