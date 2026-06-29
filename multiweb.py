@@ -1,11 +1,13 @@
 import os
 import time
+import queue
+import re
 from datetime import datetime
 import threading
 import openpyxl
 import keyboard
 from webdriver_manager.chrome import ChromeDriverManager
-
+from utils.logger import setup_global_logger
 from utils.config import (
     INPUT_EXCEL_PATH, MAX_WORKERS,
     URL_1, ENV_NAME_1, USERNAME_1, PASSWORD_1,
@@ -40,6 +42,54 @@ def listen_for_hotkey():
     except Exception as e:
         print(f"⚠️ 热键监听启动失败 (可能缺少管理员权限)，将禁用 Ctrl+Q 功能: {e}")
 
+def excel_writer_worker(excel_path, q, log_func=print):
+    """专职 Excel 写入后台线程（带非法字符过滤）"""
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(excel_path)
+        ws = wb.active
+    except Exception as e:
+        log_func(f"❌ [写线程致命错误] 无法加载 Excel: {e}")
+        return
+
+    while True:
+        item = q.get()
+        if item == "STOP":
+            try: wb.save(excel_path)
+            except: pass
+            break
+
+        task, result = item
+        try:
+            row_data = [
+                task.index + 1, task.question_text, task.filename if task.filename else "",
+                result.crash_reason, result.tester_expectation, task.target_language if task.target_language else "N/A",
+                result.input_language, result.output_language, result.language_status,
+                result.answer_text, result.shared_link, result.evaluation_text,
+                result.actual_agent_used, result.reference_link, result.document_contain,
+                result.prep_time, result.comp_time, result.timeout_status
+            ]
+            target_row = task.index + 2
+            for col_index, value in enumerate(row_data, start=1):
+                # 🛡️ 核心防御：过滤 Excel 不支持的非法控制字符
+                if isinstance(value, str):
+                    value = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', value)
+                ws.cell(row=target_row, column=col_index, value=value)
+
+            save_success = False
+            for retry in range(3):
+                try:
+                    wb.save(excel_path)
+                    save_success = True
+                    break
+                except PermissionError:
+                    time.sleep(3)
+            if not save_success:
+                log_func(f"❌ [致命错误] 多次尝试保存失败，第 {task.index + 1} 行结果丢失！")
+        except Exception as e:
+            log_func(f"❌ [写线程异常] 写入行 {task.index + 1} 失败: {e}")
+        finally:
+            q.task_done()
 
 def run_automation_env(env_name, home_url, username, password, task_inputs, test_dir, project_dir, cached_driver_path):
     """
@@ -68,7 +118,10 @@ def run_automation_env(env_name, home_url, username, password, task_inputs, test
         wb.save(excel_path)
         custom_log(f"📊 已创建评价结果 Excel 文件: {excel_path}")
 
-    excel_write_lock = threading.Lock()  # 专属于当前环境的锁
+    result_queue = queue.Queue()
+    writer_thread = threading.Thread(target=excel_writer_worker, args=(excel_path, result_queue, custom_log),
+                                     daemon=True)
+    writer_thread.start()
 
     # ================= 启动环境专属浏览器 =================
     driver = None
@@ -112,8 +165,7 @@ def run_automation_env(env_name, home_url, username, password, task_inputs, test
                 task=task,
                 driver=driver,
                 test_dir=test_dir,
-                excel_path=excel_path,
-                excel_write_lock=excel_write_lock,
+                result_queue=result_queue,
                 stop_event=STOP_EVENT,
                 log_func=custom_log
             )
@@ -141,6 +193,10 @@ def run_automation_env(env_name, home_url, username, password, task_inputs, test
         custom_log(f"❌ 环境发生致命错误: {e}")
     finally:
     # ================= 生成当前环境的报告 =================
+        custom_log("💾 正在等待当前环境的残余数据写入 Excel...")
+        if 'result_queue' in locals():
+            result_queue.put("STOP")
+            writer_thread.join(timeout=10)
         custom_log("📊 正在生成最终的 Summary 报告...")
         from utils.config import SUMMARY_ENV_1_DIR, SUMMARY_ENV_2_DIR
         target_dir = SUMMARY_ENV_1_DIR if env_name == ENV_NAME_1 else SUMMARY_ENV_2_DIR
@@ -158,6 +214,7 @@ def run_automation_env(env_name, home_url, username, password, task_inputs, test
 
 
 def run_automation():
+    setup_global_logger()
     print("📥 正在初始化並緩存瀏覽器驅動...")
     cached_driver_path = ChromeDriverManager().install()
     threading.Thread(target=listen_for_hotkey, daemon=True).start()
@@ -171,7 +228,8 @@ def run_automation():
     # ================= 文件数量校验 =================
     valid_extensions = ('.pdf', '.docx', '.csv', '.txt')
     test_files = [f for f in os.listdir(test_dir) if f.lower().endswith(valid_extensions)]
-    if len(test_files) != len(questions):
+    expected_file_count = len([f for f in target_filenames if str(f).strip()])
+    if len(test_files) != expected_file_count:
         print(f"⚠️ 文件夹中的文件数量 ({len(test_files)}) 与 Excel 中的问题数量 ({len(questions)}) 不匹配！")
     task_inputs = []
     for i in range(len(questions)):
@@ -204,7 +262,7 @@ def run_automation():
         while any(t.is_alive() for t in threads):
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n🛑 侦测到系统强行中断信号 (Ctrl+C)！正在通知所有环境紧急保存并生成报告...")
+        print("\n🛑 侦测到系统强行中断信号 (Ctrl+Q)！正在通知所有环境紧急保存并生成报告...")
         STOP_EVENT.set()
         # 必须等待子线程把 finally 里的报告生成完毕，主线程才能死
         for t in threads:
