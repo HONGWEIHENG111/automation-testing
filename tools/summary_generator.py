@@ -28,7 +28,7 @@ def generate_summary_csv(excel_path, output_csv_path):
     valid_total_tests = total_tests - timeout_mask.sum() - crash_count  # 非超时任务的有效总数
     if valid_total_tests < 0: valid_total_tests = 0
     failed_mask = ((df['Language Overall Status'].astype(str).str.contains('Failed', na=False, case=False)) | \
-                   (df['Tester Expectation'].astype(str).isin(['Poor', 'Failed', 'Parse Error (Failed)']))) & (~timeout_mask) & (~crash_mask)
+                   (df['Tester Expectation'].astype(str).isin(['Poor', 'Failed', 'Parse Error(Failed)']))) & (~timeout_mask) & (~crash_mask)
     failed_count = failed_mask.sum()
     pass_count = valid_total_tests - failed_count
 
