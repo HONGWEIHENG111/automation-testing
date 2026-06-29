@@ -1,7 +1,8 @@
 import os
 import threading
 import openpyxl
-from typing import Callable
+import queue
+from typing import Callable, Optional
 from selenium.webdriver.remote.webdriver import WebDriver
 import time
 from .models import TaskInput, TaskResult
@@ -17,9 +18,10 @@ def process_single_task(
         task: TaskInput,
         driver: WebDriver,
         test_dir: str,
-        excel_path: str,
-        excel_write_lock: threading.Lock,
         stop_event: threading.Event,
+        excel_path: Optional[str] = None,
+        excel_write_lock: Optional[threading.Lock] = None,
+        result_queue: Optional[queue.Queue] = None,
         log_func: Callable[[str], None] = print
 ) -> str:
     """
@@ -117,7 +119,7 @@ def process_single_task(
             result.answer_text = answer
             result.shared_link = current_url
 
-            prep_time, comp_time = interactor.extract_react_times()
+            prep_time, comp_time = interactor.extract_react_times(stop_event)
             result.prep_time = prep_time
             result.comp_time = comp_time
 
@@ -171,53 +173,58 @@ def process_single_task(
             status_to_return = "ERROR"
 
     # ================= 6. 线程安全地写入 Excel =================
-    with excel_write_lock:
-        try:
-            wb = openpyxl.load_workbook(excel_path)
-            ws = wb.active
+    if status_to_return != "STOPPED":
+        if result_queue is not None:
+            result_queue.put((task, result))
+            log_func("⚡ 结果已推入极速写入队列。")
+        elif excel_write_lock is not None and excel_path is not None:
+            with excel_write_lock:
+                try:
+                    wb = openpyxl.load_workbook(excel_path)
+                    ws = wb.active
 
             # 严格按照表头顺序拼装行数据
-            row_data = [
-                task.index + 1,  # label
-                task.question_text,  # Request
-                task.filename if task.filename else "",  # filename
-                result.crash_reason,  # Crash
-                result.tester_expectation,  # Tester Expectation
-                task.target_language if task.target_language else "N/A",  # Selected Language
-                result.input_language,  # Input Language
-                result.output_language,  # Output Language
-                result.language_status,  # Language Overall Status
-                result.answer_text,  # answer
-                result.shared_link,  # shared link
-                result.evaluation_text,  # DeepSeek评价内容
-                result.actual_agent_used,  # Selected agent
-                result.reference_link,  # Reference Link
-                result.document_contain,  # Document Contain[1][2][3]
-                result.prep_time,  # Preparation Time
-                result.comp_time,  # Completion Time
-                result.timeout_status  # Timeout_States
-            ]
+                    row_data = [
+                        task.index + 1,  # label
+                        task.question_text,  # Request
+                        task.filename if task.filename else "",  # filename
+                        result.crash_reason,  # Crash
+                        result.tester_expectation,  # Tester Expectation
+                        task.target_language if task.target_language else "N/A",  # Selected Language
+                        result.input_language,  # Input Language
+                        result.output_language,  # Output Language
+                        result.language_status,  # Language Overall Status
+                        result.answer_text,  # answer
+                        result.shared_link,  # shared link
+                        result.evaluation_text,  # DeepSeek评价内容
+                        result.actual_agent_used,  # Selected agent
+                        result.reference_link,  # Reference Link
+                        result.document_contain,  # Document Contain[1][2][3]
+                        result.prep_time,  # Preparation Time
+                        result.comp_time,  # Completion Time
+                        result.timeout_status  # Timeout_States
+                    ]
 
-            # 精准占位写入（因为有表头，所以目标行是 index + 2）
-            target_row = task.index + 2
-            for col_index, value in enumerate(row_data, start=1):
-                ws.cell(row=target_row, column=col_index, value=value)
+                    # 精准占位写入（因为有表头，所以目标行是 index + 2）
+                    target_row = task.index + 2
+                    for col_index, value in enumerate(row_data, start=1):
+                        ws.cell(row=target_row, column=col_index, value=value)
 
-            save_success = False
-            for retry in range(3):
-                try:
-                    wb.save(excel_path)
-                    save_success = True
-                    break
-                except PermissionError:
-                    log_func(f"⚠️ [警告] Excel 文件正被打开！请立刻关闭！{3 - retry} 秒后重试...")
-                    time.sleep(3)
+                    save_success = False
+                    for retry in range(3):
+                        try:
+                            wb.save(excel_path)
+                            save_success = True
+                            break
+                        except PermissionError:
+                            log_func(f"⚠️ [警告] Excel 文件正被打开！请立刻关闭！{3 - retry} 秒后重试...")
+                            time.sleep(3)
 
-            if save_success:
-                log_func("✅ 结果已成功写入 Excel。")
-            else:
-                log_func("❌ [致命错误] 多次尝试保存 Excel 失败，本次结果丢失！")
-        except Exception as excel_err:
-            log_func(f"❌ [致命错误] 读写 Excel 发生未知异常: {excel_err}")
+                    if save_success:
+                        log_func("✅ 结果已成功写入 Excel。")
+                    else:
+                        log_func("❌ [致命错误] 多次尝试保存 Excel 失败，本次结果丢失！")
+                except Exception as excel_err:
+                    log_func(f"❌ [致命错误] 读写 Excel 发生未知异常: {excel_err}")
 
     return status_to_return
