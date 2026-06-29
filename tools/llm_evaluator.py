@@ -92,7 +92,7 @@ def evaluate_with_deepseek(question_text: str, file_content: str, answer_text: s
                 base_wait = 2 ** (attempt + 1)  # 第一次等 2秒，第二次等 4秒
                 jitter = random.uniform(0.5, 2.0)  # 加上 0.5 到 2 秒的随机误差
                 wait_time = base_wait + jitter
-                print(f"   ⏳ 触发防并发限流机制，等待 {wait_time:.2f} 秒后重试...")
+                safe_eval_print(f"   ⏳ 触发防并发限流机制，等待 {wait_time:.2f} 秒后重试...")
                 time.sleep(wait_time)
             else:
                 # 如果解析失败，返回带有错误信息的默认字典结构
@@ -101,7 +101,7 @@ def evaluate_with_deepseek(question_text: str, file_content: str, answer_text: s
                 "input_language": "Parse Error",
                 "output_language": "Parse Error",
                 "language_status": "Failed",
-                "evaluation": f"API调用或解析失败。原始返回：{raw_result if 'raw_result' in locals() else str(e)}",
+                "evaluation": f"API调用失败。错误: {str(e)}。 接口返回: {raw_result if raw_result else '无返回数据'}",
                 "reference_link": "N/A",
                 "document_contain_citations": "None"
                 }
